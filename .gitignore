@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+.faiss_index/
+.faiss_index_playwright/
+.playwright-docs/
+*.egg-info/
+.pytest_cache/
+.DS_Store
