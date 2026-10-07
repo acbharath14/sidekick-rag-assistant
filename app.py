@@ -300,6 +300,8 @@ if st.session_state.pop("reg_run_all", False) and index_ok:
             _results.append(
                 {
                     "id": _case["id"],
+                    "question": _case["question"],
+                    "answer": _ans.text,
                     "ok": all(_p for _, _p in _checks),
                     "checks": _checks,
                     "sources": _ans.sources,
@@ -324,6 +326,8 @@ if st.session_state.get("reg_results"):
                 st.markdown(f"{_mark} `{_r['id']}` — crashed: {_r['error']}")
                 continue
             with st.expander(f"{_mark} `{_r['id']}`", expanded=False):
+                st.markdown(f"**Q:** {_r['question']}")
+                st.markdown(_r["answer"])
                 for _name, _passed_check in _r["checks"]:
                     st.markdown(f"{'✓' if _passed_check else '✗'} {_name}")
                 st.caption(f"sources: {_r['sources']}")
