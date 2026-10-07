@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 import streamlit as st
 
 from rag_demo.chain import stream_ask
-from rag_demo.config import get_settings
+from rag_demo.config import get_embeddings, get_settings
 from rag_demo.ingest import INDEX_DIRS
 from rag_demo.sources import SOURCES
 
@@ -89,13 +89,26 @@ SUGGESTIONS = {
 # ---------------------------------------------------------------- sidebar ---
 with st.sidebar:
     st.header("📚 Sidekick")
+    corpus_options = [c for c in SOURCES if c in CORPUS_LABELS]
+    if st.session_state.get("upload_retriever") is not None:
+        corpus_options.append("upload")
+        CORPUS_LABELS["upload"] = (
+            f"Uploaded: {st.session_state.get('upload_name', 'file')}"
+        )
+    default_corpus = st.session_state.pop("corpus_override", "meridian")
+    if default_corpus not in corpus_options:
+        default_corpus = "meridian"
     corpus = st.radio(
         "Corpus",
-        options=[c for c in SOURCES if c in CORPUS_LABELS],
+        options=corpus_options,
         format_func=lambda c: CORPUS_LABELS.get(c, c),
+        index=corpus_options.index(default_corpus),
         help="Build an index first: python -m rag_demo.ingest --source <name>",
     )
-    if corpus != "meridian":
+    upload_retriever = (
+        st.session_state.get("upload_retriever") if corpus == "upload" else None
+    )
+    if corpus != "meridian" and corpus != "upload":
         settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
 
     st.divider()
@@ -120,13 +133,93 @@ with st.sidebar:
         + (" + rerank" if settings.rerank_enabled else "")
     )
 
+    st.divider()
+    st.subheader("📎 Upload a document")
+    uploaded = st.file_uploader(
+        "PDF, DOCX, TXT, MD, or CSV",
+        type=["pdf", "docx", "txt", "md", "csv"],
+        help="Extracted in memory only — nothing is written to disk or committed.",
+    )
+    if uploaded is not None:
+        import os
+
+        max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
+        if uploaded.size > max_mb * 1024 * 1024:
+            st.error(f"File too large (over {max_mb:.0f} MB).")
+        elif st.session_state.get("upload_name") != uploaded.name:
+            from rag_demo.extract import UnsupportedFormat, extract_text
+
+            try:
+                text = extract_text(uploaded.name, uploaded.read())
+            except UnsupportedFormat as e:
+                st.error(str(e))
+            else:
+                st.session_state.upload_name = uploaded.name
+                st.session_state.upload_text = text
+                st.session_state.upload_summary = None
+                st.session_state.upload_retriever = None
+                st.success(f"Extracted {len(text):,} characters from {uploaded.name}.")
+    if st.session_state.get("upload_text"):
+        if st.button("📝 Summarize", use_container_width=True):
+            from rag_demo.summarize import summarize
+
+            with st.spinner("Summarizing…"):
+                st.session_state.upload_summary = summarize(
+                    st.session_state.upload_text, settings
+                )
+        if st.button("💬 Ask about this file", use_container_width=True):
+            from langchain_community.vectorstores import FAISS
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+            from rag_demo.retriever import Retriever
+
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
+            )
+            chunks = splitter.split_text(st.session_state.upload_text)
+            source_name = f"upload:{st.session_state.upload_name}"
+            store = FAISS.from_texts(
+                chunks,
+                get_embeddings(settings),
+                metadatas=[
+                    {"source": source_name, "allowed_groups": ["*"]} for _ in chunks
+                ],
+            )
+            chunk_dicts = [
+                {"text": c, "source": source_name, "allowed_groups": ["*"]}
+                for c in chunks
+            ]
+            st.session_state.upload_retriever = Retriever(
+                settings, store=store, chunks=chunk_dicts
+            )
+            st.session_state.corpus_override = "upload"
+            st.rerun()
+        if st.button("🗑️ Clear upload", use_container_width=True):
+            for key in (
+                "upload_name",
+                "upload_text",
+                "upload_summary",
+                "upload_retriever",
+                "corpus_override",
+            ):
+                st.session_state.pop(key, None)
+            st.rerun()
+
 # ------------------------------------------------------------------ state ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
     st.session_state.history = []
 
-index_ok = settings.index_dir.exists()
+index_ok = settings.index_dir.exists() or upload_retriever is not None
+
+# ------------------------------------------------------------------ summary ---
+if st.session_state.get("upload_summary"):
+    with st.expander("📝 Document summary", expanded=True):
+        st.markdown(st.session_state.upload_summary)
+        if st.button("Dismiss summary"):
+            st.session_state.upload_summary = None
+            st.rerun()
 
 # ------------------------------------------------------------------- hero ---
 if not st.session_state.messages:
@@ -185,6 +278,7 @@ if question and index_ok:
                 settings,
                 history=st.session_state.history,
                 user_groups=groups,
+                retriever=upload_retriever,
             ):
                 if "token" in event:
                     yield event["token"]

@@ -107,6 +107,15 @@ RAG_DEMO_USER_GROUPS=eng-all PYTHONPATH=src streamlit run app.py
 Restricted chunks are filtered *before* the prompt — the LLM never sees
 what the user may not. See `ARCHITECTURE.md`.
 
+### Upload a document
+
+In the Streamlit sidebar: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
+10 MB cap). The app extracts the text in memory, offers a **📝 Summarize**
+button (map-reduce for long docs), and **💬 Ask about this file** builds an
+in-memory index so you can chat over it with `[upload:filename]` citations.
+Nothing is written to disk or committed; with local Ollama, bytes never
+leave the machine.
+
 ### Nightly refresh
 
 ```bash
@@ -150,6 +159,8 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 │   ├── rewrite.py           # multi-turn query rewriting
 │   ├── chain.py             # RAG chain with citations (+ streaming)
 │   ├── audit.py             # opt-in JSONL audit log
+│   ├── extract.py           # file text extraction (pdf/docx/txt/md/csv)
+│   ├── summarize.py         # map-reduce document summarization
 │   ├── cli.py               # conversational REPL (with history)
 │   └── mcp_server.py        # MCP server (search_docs tool)
 ├── fixtures/confluence/     # mock Confluence REST fixtures (incl. restricted page)
