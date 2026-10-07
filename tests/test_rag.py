@@ -154,14 +154,25 @@ def test_chunks_json_written_on_ingest(_indexed):
     assert data and all({"text", "source", "doc_id"} <= set(c) for c in data)
 
 
-def test_hybrid_retrieval_finds_keyword_doc(_indexed, monkeypatch):
+def test_hybrid_bm25_finds_keyword_doc(_indexed, monkeypatch):
+    # BM25 is deterministic; assert on it directly instead of the fused
+    # ranking (the dense side uses random FakeEmbeddings in tests).
+    monkeypatch.setenv("RAG_DEMO_RETRIEVAL", "hybrid")
+    s = get_settings()
+    s.index_dir = _indexed.index_dir
+    r = Retriever(s)
+    assert r.bm25 is not None
+    hits = r._bm25_search("weight_kg", k=3)
+    assert any(h.source == "api-reference.md" for h in hits)
+
+
+def test_hybrid_search_returns_k_hits(_indexed, monkeypatch):
     monkeypatch.setenv("RAG_DEMO_RETRIEVAL", "hybrid")
     s = get_settings()
     s.index_dir = _indexed.index_dir
     r = Retriever(s)
     hits = r.search("weight_kg", k=3)
-    assert hits
-    assert any(h.source == "api-reference.md" for h in hits)
+    assert len(hits) == 3
 
 
 def test_rewrite_no_history_returns_question_unchanged():
