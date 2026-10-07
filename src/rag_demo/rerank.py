@@ -22,6 +22,11 @@ class Reranker:
         scores = self.model.predict([(query, h.text) for h in hits])
         ranked = sorted(zip(scores, hits), key=lambda pair: pair[0], reverse=True)
         return [
-            Hit(text=h.text, source=h.source, score=float(s))
+            Hit(
+                text=h.text,
+                source=h.source,
+                score=float(s),
+                allowed_groups=h.allowed_groups,
+            )
             for s, h in ranked[:top_k]
         ]

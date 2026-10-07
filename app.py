@@ -16,6 +16,8 @@ import streamlit as st
 
 from rag_demo.chain import ask
 from rag_demo.config import get_settings
+from rag_demo.sources import SOURCES
+from rag_demo.ingest import INDEX_DIRS
 
 st.set_page_config(page_title="RAG Assistant Demo", page_icon="📚")
 
@@ -26,19 +28,24 @@ st.caption(
 )
 
 settings = get_settings()
+
+CORPUS_LABELS = {
+    "meridian": "Meridian Logistics (fictional, default)",
+    "playwright-docs": "Playwright docs (optional index)",
+    "github-docs": "GitHub repo docs (optional index)",
+    "confluence-mock": "Confluence mock (optional index)",
+}
+
 with st.sidebar:
     st.header("Corpus")
     corpus = st.radio(
         "Which index to query",
-        options=["meridian", "playwright-docs"],
-        format_func=lambda c: {
-            "meridian": "Meridian Logistics (fictional, default)",
-            "playwright-docs": "Playwright docs (optional index)",
-        }[c],
-        help="Build the Playwright index first: python -m rag_demo.ingest --source playwright-docs",
+        options=[c for c in SOURCES if c in CORPUS_LABELS],
+        format_func=lambda c: CORPUS_LABELS.get(c, c),
+        help="Build an index first: python -m rag_demo.ingest --source <name>",
     )
-    if corpus == "playwright-docs":
-        settings.index_dir = settings.index_dir.parent / ".faiss_index_playwright"
+    if corpus != "meridian":
+        settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
     st.divider()
     st.caption(
         f"LLM: `{settings.llm_provider}`\n\nEmbeddings: `{settings.embedding_provider}`"

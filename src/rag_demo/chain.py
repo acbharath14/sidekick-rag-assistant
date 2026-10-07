@@ -11,6 +11,7 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from .config import Settings, get_llm, get_settings
 from .retriever import Hit, Retriever
 from .rewrite import rewrite_query
+from .audit import log_question
 
 SYSTEM = """You answer questions using ONLY the context below.
 If the context doesn't contain the answer, say you don't know. Cite the source
@@ -57,8 +58,13 @@ def ask(
     question: str,
     settings: Settings | None = None,
     history: list[tuple[str, str]] | None = None,
+    user_groups: list[str] | None = None,
 ) -> Answer:
-    """history: list of (question, answer) tuples for multi-turn context."""
+    """history: list of (question, answer) tuples for multi-turn context.
+    user_groups: asker's groups for permission-aware retrieval (defaults to
+    settings.user_groups)."""
+    import time
+
     settings = settings or get_settings()
     history = history or []
     llm = get_llm(settings)
@@ -67,8 +73,11 @@ def ask(
         if settings.rewrite_enabled and history
         else question
     )
+    started = time.perf_counter()
     chain, retriever = build_chain(settings)
     text = chain.invoke(standalone)
-    hits = retriever.search(standalone)
+    hits = retriever.search(standalone, user_groups=user_groups)
     sources = sorted({h.source for h in hits})
-    return Answer(text=text, sources=sources, hits=hits)
+    answer = Answer(text=text, sources=sources, hits=hits)
+    log_question(settings, question, answer, (time.perf_counter() - started) * 1000)
+    return answer

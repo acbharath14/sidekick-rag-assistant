@@ -37,6 +37,7 @@ class Hit:
     text: str
     source: str
     score: float
+    allowed_groups: tuple = ("*",)
 
 
 def rrf_fuse(rankings: list[list[Hit]], k: int, rrf_k: int = RRF_K) -> list[Hit]:
@@ -56,7 +57,10 @@ def rrf_fuse(rankings: list[list[Hit]], k: int, rrf_k: int = RRF_K) -> list[Hit]
                 fused[key] = entry
             entry[1] += 1.0 / (rrf_k + rank)
     scored = sorted(fused.values(), key=lambda e: e[1], reverse=True)
-    return [Hit(text=h.text, source=h.source, score=s) for h, s in scored[:k]]
+    return [
+        Hit(text=h.text, source=h.source, score=s, allowed_groups=h.allowed_groups)
+        for h, s in scored[:k]
+    ]
 
 
 class Retriever:
@@ -95,7 +99,12 @@ class Retriever:
     def _dense_search(self, query: str, k: int) -> list[Hit]:
         results: list[tuple[Document, float]] = self.store.similarity_search_with_score(query, k=k)
         return [
-            Hit(text=d.page_content, source=d.metadata.get("source", "?"), score=float(s))
+            Hit(
+                text=d.page_content,
+                source=d.metadata.get("source", "?"),
+                score=float(s),
+                allowed_groups=tuple(d.metadata.get("allowed_groups", ["*"])),
+            )
             for d, s in results
         ]
 
@@ -107,6 +116,7 @@ class Retriever:
                 text=self.chunks[i]["text"],
                 source=self.chunks[i]["source"],
                 score=float(scores[i]),
+                allowed_groups=tuple(self.chunks[i].get("allowed_groups", ["*"])),
             )
             for i in top
         ]
@@ -120,11 +130,21 @@ class Retriever:
         return self._reranker.rerank(query, hits, k)
 
     def search(
-        self, query: str, k: int | None = None, rerank: bool | None = None
+        self,
+        query: str,
+        k: int | None = None,
+        rerank: bool | None = None,
+        user_groups: list[str] | None = None,
     ) -> list[Hit]:
+        """user_groups: groups the asker belongs to. Hits whose allowed_groups
+        don't intersect are filtered BEFORE the prompt (never rely on the LLM
+        to withhold what it has seen)."""
         k = k or self.settings.top_k
         rerank = self.settings.rerank_enabled if rerank is None else rerank
-        wide = rerank or self.settings.retrieval == "hybrid"
+        if user_groups is None:
+            user_groups = self.settings.user_groups
+        filtering = bool(user_groups)
+        wide = rerank or self.settings.retrieval == "hybrid" or filtering
         want = FUSION_CANDIDATES if wide else k
         if self.settings.retrieval == "hybrid" and self.bm25 is not None:
             dense = self._dense_search(query, k=FUSION_CANDIDATES)
@@ -132,6 +152,13 @@ class Retriever:
             hits = rrf_fuse([dense, bm25], k=want)
         else:
             hits = self._dense_search(query, k=want)
+        if filtering:
+            groups = set(user_groups)
+            hits = [
+                h
+                for h in hits
+                if "*" in h.allowed_groups or groups & set(h.allowed_groups)
+            ]
         if rerank:
             hits = self._maybe_rerank(query, hits, k)
         return hits[:k]
