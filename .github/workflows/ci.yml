@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "tests/**", "evals/**", "requirements.txt"]
+  pull_request:
+    paths: ["src/**", "tests/**", "evals/**", "requirements.txt"]
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays, keep the badge honest
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
