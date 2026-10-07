@@ -10,6 +10,7 @@ model on first use (never on CI).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from langchain_community.vectorstores import FAISS
@@ -21,6 +22,11 @@ try:
     from rank_bm25 import BM25Okapi
 except ImportError:  # pragma: no cover - rank-bm25 is a hard dependency
     BM25Okapi = None
+
+def _tokenize(text: str) -> list[str]:
+    """Word tokens: strips punctuation so `weight_kg` matches weight_kg."""
+    return re.findall(r"\w+", text.lower())
+
 
 RRF_K = 60
 FUSION_CANDIDATES = 20
@@ -92,7 +98,7 @@ class Retriever:
                     f"hybrid retrieval needs {self.settings.index_dir}/chunks.json — "
                     "rebuild the index with the current ingest"
                 )
-            self.bm25 = BM25Okapi([c["text"].lower().split() for c in self.chunks])
+            self.bm25 = BM25Okapi([_tokenize(c['text']) for c in self.chunks])
         self._reranker = None
 
     def _load_chunks(self) -> list[dict]:
@@ -114,7 +120,7 @@ class Retriever:
         ]
 
     def _bm25_search(self, query: str, k: int) -> list[Hit]:
-        scores = self.bm25.get_scores(query.lower().split())
+        scores = self.bm25.get_scores(_tokenize(query))
         top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
         return [
             Hit(
