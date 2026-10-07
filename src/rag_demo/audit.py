@@ -35,3 +35,23 @@ def log_question(settings, question: str, answer, latency_ms: float) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def log_feedback(settings, question: str, vote: str) -> None:
+    """Persist a thumbs up/down vote. Uses the audit log path when set,
+    otherwise a feedback.jsonl next to it (or the current directory)."""
+    base = settings.audit_log_path
+    path = (
+        str(Path(base).with_name("feedback.jsonl"))
+        if base
+        else str(Path("feedback.jsonl"))
+    )
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "question": question,
+        "vote": vote,  # "up" or "down"
+    }
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")

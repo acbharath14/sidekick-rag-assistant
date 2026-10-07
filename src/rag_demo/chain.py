@@ -25,15 +25,23 @@ class Answer:
     text: str
     sources: list[str]
     hits: list[Hit]
+    latency_ms: float | None = None
 
 
 def format_hits(hits: list[Hit]) -> str:
     return "\n\n".join(f"[{h.source}]\n{h.text}" for h in hits)
 
 
-def build_chain(settings: Settings | None = None, retriever: Retriever | None = None):
+def build_chain(
+    settings: Settings | None = None,
+    retriever: Retriever | None = None,
+    user_groups: list[str] | None = None,
+):
     settings = settings or get_settings()
     retriever = retriever or Retriever(settings)
+    # Resolve groups once: the SAME filtered hits feed the prompt AND the
+    # returned answer. Never let the LLM see what the user may not.
+    groups = user_groups if user_groups is not None else settings.user_groups
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", SYSTEM),
@@ -43,7 +51,7 @@ def build_chain(settings: Settings | None = None, retriever: Retriever | None = 
             ),
         ]
     )
-    retrieve = RunnableLambda(lambda q: retriever.search(q))
+    retrieve = RunnableLambda(lambda q: retriever.search(q, user_groups=groups))
     chain = (
         {
             "context": retrieve | RunnableLambda(format_hits),
@@ -53,7 +61,7 @@ def build_chain(settings: Settings | None = None, retriever: Retriever | None = 
         | get_llm(settings)
         | StrOutputParser()
     )
-    return chain, retriever
+    return chain, retriever, groups
 
 
 def ask(
@@ -78,12 +86,15 @@ def ask(
         else question
     )
     started = time.perf_counter()
-    chain, retriever = build_chain(settings, retriever=retriever)
+    chain, retriever, groups = build_chain(
+        settings, retriever=retriever, user_groups=user_groups
+    )
     text = chain.invoke(standalone)
-    hits = retriever.search(standalone, user_groups=user_groups)
+    latency_ms = (time.perf_counter() - started) * 1000
+    hits = retriever.search(standalone, user_groups=groups)
     sources = sorted({h.source for h in hits})
-    answer = Answer(text=text, sources=sources, hits=hits)
-    log_question(settings, question, answer, (time.perf_counter() - started) * 1000)
+    answer = Answer(text=text, sources=sources, hits=hits, latency_ms=latency_ms)
+    log_question(settings, question, answer, latency_ms)
     return answer
 
 
@@ -107,7 +118,9 @@ def stream_ask(
         else question
     )
     started = time.perf_counter()
-    chain, retriever = build_chain(settings, retriever=retriever)
+    chain, retriever, groups = build_chain(
+        settings, retriever=retriever, user_groups=user_groups
+    )
     parts: list[str] = []
     try:
         for chunk in chain.stream(standalone):
@@ -119,7 +132,13 @@ def stream_ask(
         yield {"token": text}
         parts = [text]
     text = "".join(parts)
-    hits = retriever.search(standalone, user_groups=user_groups)
-    answer = Answer(text=text, sources=sorted({h.source for h in hits}), hits=hits)
-    log_question(settings, question, answer, (time.perf_counter() - started) * 1000)
+    latency_ms = (time.perf_counter() - started) * 1000
+    hits = retriever.search(standalone, user_groups=groups)
+    answer = Answer(
+        text=text,
+        sources=sorted({h.source for h in hits}),
+        hits=hits,
+        latency_ms=latency_ms,
+    )
+    log_question(settings, question, answer, latency_ms)
     yield {"answer": answer}

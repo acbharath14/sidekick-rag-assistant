@@ -276,9 +276,37 @@ def test_acl_filtering_hides_restricted_hits(_indexed_confluence):
     assert any("Salary bands" in h.source for h in leads_hits)
     all_hits = r.search("salary bands", k=10, user_groups=["eng-all"])
     assert not any("Salary bands" in h.source for h in all_hits)
-    # No groups given -> no filtering (backwards compatible).
-    unfiltered = r.search("salary bands", k=10)
-    assert any("Salary bands" in h.source for h in unfiltered)
+    # Default-deny: no/empty groups see public docs only, never restricted.
+    for groups in (None, []):
+        hits = r.search("salary bands", k=10, user_groups=groups)
+        assert not any("Salary bands" in h.source for h in hits)
+        assert hits  # public docs still visible
+
+
+def test_chain_prompt_never_sees_restricted_text(_indexed_confluence, monkeypatch):
+    # The retrieval feeding the LLM prompt must be ACL-filtered, not just
+    # the displayed sources. Echo-LLM returns the prompt it received.
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+
+    settings, _ = _indexed_confluence
+    monkeypatch.setattr(
+        chain_mod,
+        "get_llm",
+        lambda s: RunnableLambda(lambda prompt: prompt.to_string()),
+    )
+    chain, _, groups = build_chain(settings, user_groups=["eng-all"])
+    assert groups == ["eng-all"]
+    assert "Salary bands" not in chain.invoke("salary bands")
+
+    chain, _, _ = build_chain(settings, user_groups=["eng-leads"])
+    assert "Salary bands" in chain.invoke("salary bands")
+
+    # Empty groups default-deny at the chain level too.
+    chain, _, groups = build_chain(settings, user_groups=[])
+    assert groups == []
+    assert "Salary bands" not in chain.invoke("salary bands")
 
 
 def test_audit_log_writes_one_line_per_ask(_indexed, tmp_path, monkeypatch):
@@ -551,3 +579,17 @@ def test_regression_cases_are_well_formed():
     assert len(cases) >= 8
     for case in cases:
         assert case["id"] and case["question"]
+
+
+def test_feedback_log_appends_vote(tmp_path, monkeypatch):
+    from rag_demo.audit import log_feedback
+
+    monkeypatch.setenv("RAG_DEMO_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    s = get_settings()
+    log_feedback(s, "How do I create a shipment?", "up")
+    log_feedback(s, "What is the CEO's color?", "down")
+    lines = (tmp_path / "feedback.jsonl").read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 2
+    first, second = (json.loads(line) for line in lines)
+    assert first["vote"] == "up" and "shipment" in first["question"]
+    assert second["vote"] == "down" and first["ts"]

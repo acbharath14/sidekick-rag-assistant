@@ -18,6 +18,7 @@ import json
 import streamlit as st
 
 from evals.regression import check_case
+from rag_demo.audit import log_feedback
 from rag_demo.chain import ask, stream_ask
 from rag_demo.config import get_embeddings, get_settings
 from rag_demo.ingest import INDEX_DIRS
@@ -90,6 +91,27 @@ SUGGESTIONS = {
     ],
 }
 
+def _ollama_reachable(base_url: str) -> bool:
+    try:
+        import urllib.request
+
+        urllib.request.urlopen(f"{base_url}/api/tags", timeout=2)
+        return True
+    except Exception:  # noqa: BLE001 — unreachable is a status, not an error
+        return False
+
+
+def _chat_markdown(messages: list[dict]) -> str:
+    lines = ["# Sidekick chat export", ""]
+    for m in messages:
+        lines.append(f"## {'You' if m['role'] == 'user' else 'Sidekick'}")
+        lines.append(m["text"])
+        if m.get("sources"):
+            lines.append(f"*Sources: {', '.join(m['sources'])}*")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _load_regression_cases() -> list[dict]:
     """Standard prompts shared with evals/regression.py (single source of truth)."""
     path = Path(__file__).resolve().parent / "evals" / "regression_cases.json"
@@ -136,6 +158,14 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.history = []
         st.rerun()
+    if st.session_state.get("messages"):
+        st.download_button(
+            "📥 Export chat",
+            data=_chat_markdown(st.session_state.messages),
+            file_name="sidekick-chat.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
     st.divider()
     st.subheader("Engine")
@@ -145,6 +175,12 @@ with st.sidebar:
         f"**Retrieval** `{settings.retrieval}`"
         + (" + rerank" if settings.rerank_enabled else "")
     )
+    if settings.fake or settings.llm_provider != "ollama":
+        st.caption("🎭 Fake LLM (RAG_DEMO_FAKE=1)")
+    elif _ollama_reachable(settings.ollama_base_url):
+        st.caption("🟢 Ollama connected")
+    else:
+        st.caption("🔴 Ollama unreachable — start it with `ollama serve`")
 
     st.divider()
     with st.expander("🧪 Regression prompts"):
@@ -332,6 +368,10 @@ for msg in st.session_state.messages:
                 f'<span class="citation-pill">{s}</span>' for s in msg["sources"]
             )
             st.markdown(pills, unsafe_allow_html=True)
+        if msg.get("latency_ms") is not None:
+            st.caption(
+                f"⚡ {msg['latency_ms']/1000:.1f}s · {len(msg.get('hits', []))} passages"
+            )
         if msg.get("hits"):
             with st.expander("Retrieved passages"):
                 for h in msg["hits"]:
@@ -396,6 +436,10 @@ if question and index_ok:
                 f'<span class="citation-pill">{s}</span>' for s in answer.sources
             )
             st.markdown(pills, unsafe_allow_html=True)
+        if answer.latency_ms is not None:
+            st.caption(
+                f"⚡ {answer.latency_ms/1000:.1f}s · {len(answer.hits)} passages"
+            )
         with st.expander("Retrieved passages"):
             for h in answer.hits:
                 st.markdown(f"**[{h.source}]** (score {h.score:.3f})")
@@ -405,9 +449,11 @@ if question and index_ok:
         fb_col1, fb_col2 = st.columns([1, 1])
         with fb_col1:
             if st.button("👍", key=f"up-{len(st.session_state.messages)}"):
+                log_feedback(settings, question, "up")
                 st.toast("Thanks for the feedback!")
         with fb_col2:
             if st.button("👎", key=f"down-{len(st.session_state.messages)}"):
+                log_feedback(settings, question, "down")
                 st.toast("Thanks — we'll use this to improve retrieval.")
 
     reg_checks = (
@@ -432,6 +478,7 @@ if question and index_ok:
             "hits": answer.hits,
             "checks": reg_checks,
             "case_id": reg_case["id"] if reg_case else None,
+            "latency_ms": answer.latency_ms,
         }
     )
     st.session_state.history.append((question, answer.text))
