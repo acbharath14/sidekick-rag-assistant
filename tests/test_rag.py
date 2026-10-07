@@ -532,3 +532,22 @@ def test_retriever_accepts_injected_store(_indexed):
     ])
     hits = r.search("wombats", k=1)
     assert hits and hits[0].source == "upload:test.txt"
+
+
+def test_regression_runner_passes_end_to_end(_indexed, monkeypatch):
+    # Fake tier: proves the full ask() pipeline runs for every standard
+    # prompt (retrieval + chain + citations). Deterministic by design.
+    import evals.regression as reg
+
+    assert reg.main(settings=_indexed) == 0
+
+
+def test_regression_cases_are_well_formed():
+    cases = json.loads(
+        Path(__file__).resolve().parent.parent.joinpath(
+            "evals/regression_cases.json"
+        ).read_text()
+    )
+    assert len(cases) >= 8
+    for case in cases:
+        assert case["id"] and case["question"]

@@ -73,6 +73,11 @@ PYTHONPATH=src python -m rag_demo.cli
 # 3. Evaluate retrieval quality against the golden set
 PYTHONPATH=src python -m evals.eval_retrieval
 
+# 3b. Run the end-to-end regression suite (standard prompts, full pipeline)
+RAG_DEMO_FAKE=1 PYTHONPATH=src python -m evals.regression
+# With Ollama running, also check answer content:
+PYTHONPATH=src python -m evals.regression --real-llm
+
 # 4. Run the test suite (fakes — no models, no keys)
 RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 ```
@@ -168,7 +173,9 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 │   ├── golden.json          # 20 Q&A pairs with expected source docs
 │   ├── eval_retrieval.py    # hit-rate@k, exits non-zero below threshold
 │   ├── eval_compare.py      # dense vs hybrid vs hybrid+rerank table
-│   └── baselines.json       # per-mode hit-rate floors
+│   ├── baselines.json       # per-mode hit-rate floors
+│   ├── regression.py        # end-to-end regression runner (standard prompts)
+│   └── regression_cases.json # 8 demo cases: factual, abstention, small-talk, follow-up
 └── tests/test_rag.py        # pytest suite (fake embeddings/LLM)
 ```
 
