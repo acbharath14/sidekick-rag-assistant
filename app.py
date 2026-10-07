@@ -101,6 +101,9 @@ def _ollama_reachable(base_url: str) -> bool:
         return False
 
 
+FALLBACK_BADGE = '<span class="citation-pill">🌐 General knowledge</span>'
+
+
 def _chat_markdown(messages: list[dict]) -> str:
     lines = ["# Sidekick chat export", ""]
     for m in messages:
@@ -181,6 +184,13 @@ with st.sidebar:
         st.caption("🟢 Ollama connected")
     else:
         st.caption("🔴 Ollama unreachable — start it with `ollama serve`")
+    settings.hybrid_fallback = st.checkbox(
+        "🌐 General-knowledge fallback",
+        value=settings.hybrid_fallback,
+        help="When the corpus has no answer, fall back to the LLM's general "
+        "knowledge — clearly marked, never silently mixed with citations. "
+        "Off = strict corpus-only (says 'I don't know').",
+    )
 
     st.divider()
     with st.expander("🧪 Regression prompts"):
@@ -376,6 +386,8 @@ for msg in st.session_state.messages:
             st.caption(
                 f"⚡ {msg['latency_ms']/1000:.1f}s · {len(msg.get('hits', []))} passages"
             )
+        if msg.get("grounded") is False:
+            st.markdown(FALLBACK_BADGE, unsafe_allow_html=True)
         if msg.get("hits"):
             with st.expander("Retrieved passages"):
                 for h in msg["hits"]:
@@ -444,6 +456,8 @@ if question and index_ok:
             st.caption(
                 f"⚡ {answer.latency_ms/1000:.1f}s · {len(answer.hits)} passages"
             )
+        if not answer.grounded:
+            st.markdown(FALLBACK_BADGE, unsafe_allow_html=True)
         with st.expander("Retrieved passages"):
             for h in answer.hits:
                 st.markdown(f"**[{h.source}]** (score {h.score:.3f})")
@@ -483,6 +497,7 @@ if question and index_ok:
             "checks": reg_checks,
             "case_id": reg_case["id"] if reg_case else None,
             "latency_ms": answer.latency_ms,
+            "grounded": answer.grounded,
         }
     )
     st.session_state.history.append((question, answer.text))

@@ -593,3 +593,47 @@ def test_feedback_log_appends_vote(tmp_path, monkeypatch):
     first, second = (json.loads(line) for line in lines)
     assert first["vote"] == "up" and "shipment" in first["question"]
     assert second["vote"] == "down" and first["ts"]
+
+
+def test_fallback_marker_detection():
+    from rag_demo.chain import is_fallback_answer
+
+    assert is_fallback_answer("🌐 General knowledge (not from your corpus). Paris is…")
+    assert is_fallback_answer("General knowledge: Paris is the capital of France.")
+    assert not is_fallback_answer("Based on the indexed docs: see the cited sources below.")
+    assert not is_fallback_answer("Tokens are valid for 90 days [api-reference.md].")
+
+
+def test_hybrid_system_prompt_selected_by_setting(_indexed, monkeypatch):
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+
+    monkeypatch.setattr(
+        chain_mod, "get_llm",
+        lambda s: RunnableLambda(lambda prompt: prompt.to_string()),
+    )
+    _indexed.hybrid_fallback = True
+    chain, _, _ = build_chain(_indexed)
+    assert "general knowledge" in chain.invoke("What is the capital of France?").lower()
+
+    _indexed.hybrid_fallback = False
+    chain, _, _ = build_chain(_indexed)
+    assert "ONLY the context" in chain.invoke("What is the capital of France?")
+
+
+def test_ask_marks_fallback_answer_ungrounded(_indexed, monkeypatch):
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+
+    monkeypatch.setattr(
+        chain_mod, "get_llm",
+        lambda s: RunnableLambda(
+            lambda prompt: "🌐 General knowledge (not from your corpus). Paris."
+        ),
+    )
+    _indexed.hybrid_fallback = True
+    ans = ask("What is the capital of France?", _indexed)
+    assert ans.grounded is False
+    assert ans.text.startswith("🌐")

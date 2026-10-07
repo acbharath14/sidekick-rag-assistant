@@ -57,6 +57,11 @@ def check_case(case: dict, answer, real_llm: bool) -> list[tuple[str, bool]]:
                 ("natural reply (no abstention)",
                  not any(p in text for p in ABSTAIN_PHRASES)),
             )
+        if case.get("expect_fallback"):
+            checks.append(
+                ("falls back to general knowledge (marked)",
+                 not answer.grounded),
+            )
     return checks
 
 

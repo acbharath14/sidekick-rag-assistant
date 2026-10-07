@@ -1,1 +1,87 @@
-[{"expect_keywords":["90 days","token_expired"],"expected_sources":["api-reference.md"],"id":"token-expiry","question":"How long are API tokens valid, and what happens when one expires?"},{"expect_keywords":["POST","/v1/shipments"],"expected_sources":["api-reference.md"],"id":"shipment-create","question":"How do I create a shipment via the API?"},{"expect_keywords":["weight_kg"],"expected_sources":["api-reference.md"],"id":"code-identifier","question":"What is the exact JSON field name for billable weight?"},{"expect_keywords":["#logistics-ops"],"expected_sources":["deployment-runbook.md"],"id":"rollback","question":"How do I roll back a bad production deploy of the tracking service?"},{"expect_keywords":["HMAC","X-Meridian-Signature"],"expected_sources":["api-reference.md"],"id":"webhook-auth","question":"How are webhook payloads authenticated?"},{"expected_sources":["api-reference.md"],"history":[["What is the max parcel weight?","1200 kg per parcel"]],"id":"follow-up","question":"what about express?"},{"expect_abstain":true,"id":"abstention","question":"What is the CEO's favorite color?"},{"expect_small_talk":true,"id":"small-talk","question":"Hi there, thanks for your help!"}]
+[
+  {
+    "expect_keywords": [
+      "90 days",
+      "token_expired"
+    ],
+    "expected_sources": [
+      "api-reference.md"
+    ],
+    "id": "token-expiry",
+    "question": "How long are API tokens valid, and what happens when one expires?"
+  },
+  {
+    "expect_keywords": [
+      "POST",
+      "/v1/shipments"
+    ],
+    "expected_sources": [
+      "api-reference.md"
+    ],
+    "id": "shipment-create",
+    "question": "How do I create a shipment via the API?"
+  },
+  {
+    "expect_keywords": [
+      "weight_kg"
+    ],
+    "expected_sources": [
+      "api-reference.md"
+    ],
+    "id": "code-identifier",
+    "question": "What is the exact JSON field name for billable weight?"
+  },
+  {
+    "expect_keywords": [
+      "#logistics-ops"
+    ],
+    "expected_sources": [
+      "deployment-runbook.md"
+    ],
+    "id": "rollback",
+    "question": "How do I roll back a bad production deploy of the tracking service?"
+  },
+  {
+    "expect_keywords": [
+      "HMAC",
+      "X-Meridian-Signature"
+    ],
+    "expected_sources": [
+      "api-reference.md"
+    ],
+    "id": "webhook-auth",
+    "question": "How are webhook payloads authenticated?"
+  },
+  {
+    "expected_sources": [
+      "api-reference.md"
+    ],
+    "history": [
+      [
+        "What is the max parcel weight?",
+        "1200 kg per parcel"
+      ]
+    ],
+    "id": "follow-up",
+    "question": "what about express?"
+  },
+  {
+    "expect_abstain": true,
+    "id": "abstention",
+    "question": "What is the CEO's favorite color?",
+    "expect_fallback": true
+  },
+  {
+    "expect_small_talk": true,
+    "id": "small-talk",
+    "question": "Hi there, thanks for your help!"
+  },
+  {
+    "id": "general-knowledge",
+    "question": "What is the capital of France?",
+    "expect_fallback": true,
+    "expect_keywords": [
+      "Paris"
+    ]
+  }
+]

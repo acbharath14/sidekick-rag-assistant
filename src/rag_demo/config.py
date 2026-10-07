@@ -60,6 +60,11 @@ class Settings:
     rewrite_enabled: bool = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_REWRITE", "1") == "1"
     )
+    # Hybrid mode: when the corpus has no answer, fall back to the LLM's
+    # general knowledge, clearly marked (never silently mixed with citations).
+    hybrid_fallback: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_HYBRID", "1") == "1"
+    )
     # GitHub connector: token (never committed) and default repo.
     github_token: str | None = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_TOKEN")

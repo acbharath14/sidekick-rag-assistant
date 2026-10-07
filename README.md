@@ -113,6 +113,15 @@ Restricted chunks are filtered *before* the prompt — the LLM never sees
 what the user may not. ACL is default-deny: with no groups you see public
 docs only. See `ARCHITECTURE.md`.
 
+### Hybrid mode: general-knowledge fallback
+
+By default (`RAG_DEMO_HYBRID=1`), when the corpus has no answer the assistant
+falls back to the LLM's general knowledge — clearly marked with a
+🌐 badge and a "General knowledge (not from your corpus)" header, never
+silently mixed with cited facts. Uncheck it in the sidebar (or set
+`RAG_DEMO_HYBRID=0`) for strict corpus-only mode, where it says
+"I don't know" instead.
+
 ### Regression prompts (in the UI)
 
 The sidebar has a **🧪 Regression prompts** expander: 8 standard prompts
