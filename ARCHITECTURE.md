@@ -60,20 +60,38 @@ class ConfluenceSource(DocumentSource):
 Nothing downstream changes — `ingest.build_index(settings, source)` doesn't
 care where documents came from. That's the point: **the corpus is a plugin.**
 
-## Permission-aware retrieval (design note)
+## Permission-aware retrieval (implemented)
 
-In an enterprise, not every user may see every document. The demo skips this
-(deliberately — the corpus is fictional and public), but the pattern is:
+In an enterprise, not every user may see every document. Implemented via the
+safe path:
 
-1. **At index time**, store each chunk's ACLs in metadata (space permissions,
-   page restrictions, group membership).
-2. **At query time**, resolve the asker's groups *once*, then filter:
-   - cheap path: metadata filter on the vector query, or
-   - safe path: post-filter retrieved hits before they reach the prompt.
+1. **At index time**, each chunk's metadata carries `allowed_groups`
+   (Confluence page restrictions; `["*"]` for public sources).
+2. **At query time**, the asker's groups (`RAG_DEMO_USER_GROUPS`) are resolved
+   once; `Retriever.search()` post-filters hits *before* the prompt —
+   over-fetching 20 candidates so restricted hits don't eat the result budget.
+   ACLs survive RRF fusion and cross-encoder reranking (`Hit.allowed_groups`
+   is carried through both).
 
 Never rely on the LLM to "know" what the user may see — a model that has
 seen a secret in context *will* leak it under the right prompt. Filter
 before the prompt, not after the answer.
+
+Try it: index `--source confluence-mock`, then ask about "salary bands" with
+`RAG_DEMO_USER_GROUPS=eng-all` (invisible) vs `eng-leads` (visible).
+
+## Retrieval pipeline (data flow)
+
+```
+question ──▶ rewrite (multi-turn) ──▶┬──▶ dense (FAISS, top-20) ──┐
+                                     └──▶ BM25 (chunks.json, top-20) ─┤
+                                                                      ├─▶ RRF fuse ─▶ ACL filter ─▶ rerank? ─▶ top-k ─▶ prompt ─▶ LLM
+```
+
+- `RAG_DEMO_RETRIEVAL=dense` (default) skips the BM25 branch.
+- `RAG_DEMO_RERANK=1` reranks the fused top-20 with a cross-encoder.
+- `evals/eval_compare.py` measures dense vs hybrid vs hybrid+rerank on the
+  golden set; baselines live in `evals/baselines.json`.
 
 ## Scale notes (demo → production)
 
@@ -94,23 +112,23 @@ deployment (hundreds of thousands of pages) changes the *operations*, not the
 - **Retrieval quality**: `top_k` and chunk size are the two knobs that matter
   most. Tune them against the golden eval set (`evals/`), not by vibes.
 
+## What the demo deliberately omits
+
+- Real Confluence/SharePoint/Jira connectors (no credentials by design —
+  the mock source demonstrates the connector contract).
+- User identity / auth UI (groups come from `RAG_DEMO_USER_GROUPS`, as they
+  would from a gateway header in production).
+- Multi-tenant isolation.
+
 ## Evaluation
 
 `evals/eval_retrieval.py` runs a golden Q&A set against the retriever and
-reports hit-rate@k, exiting non-zero below a threshold. The discipline this
-installs:
+reports hit-rate@k, exiting non-zero below a threshold (`--retrieval` and
+`--rerank` flags select the pipeline). `evals/eval_compare.py` prints a
+dense-vs-hybrid-vs-rerank table and fails on regression vs
+`evals/baselines.json` (real-embedding runs). The discipline this installs:
 
 - Retrieval is measured, not assumed — every chunking or embedding change
   gets a number before it ships.
 - The golden set is versioned with the corpus; when docs change, the set gets
   reviewed, not silently trusted.
-
-## What the demo deliberately omits
-
-- Real enterprise connectors (no credentials, no proprietary systems).
-- Permission filtering (documented above, not implemented).
-- User identity / audit logging.
-- Multi-tenant isolation.
-
-These are production concerns. Their *shapes* are documented here so the demo
-reads as a credible distillation, not a toy that never considered them.

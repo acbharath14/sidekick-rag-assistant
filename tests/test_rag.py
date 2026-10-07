@@ -323,3 +323,78 @@ def _indexed_confluence(tmp_path_factory):
         ),
     )
     return s, True
+
+
+def test_incremental_ingest_skips_when_unchanged(_indexed, capsys):
+    store = ingest.build_index(_indexed, incremental=True)
+    assert store is None
+    out = capsys.readouterr().out
+    assert "up to date" in out
+
+
+def test_incremental_ingest_rebuilds_when_changed(_indexed, tmp_path):
+    from rag_demo.sources import MarkdownDirectorySource
+
+    # Point a fresh docs dir at the corpus plus one new file.
+    import shutil
+
+    docs_dir = tmp_path / "docs2"
+    shutil.copytree(
+        Path(__file__).resolve().parent.parent / "docs", docs_dir
+    )
+    (docs_dir / "extra.md").write_text("# Extra\n\nBrand new content here.")
+    s = get_settings()
+    s.index_dir = tmp_path / "index-incr"
+    source = MarkdownDirectorySource(docs_dir)
+    store1 = ingest.build_index(s, source)
+    n1 = store1.index.ntotal
+    store2 = ingest.build_index(s, source, incremental=True)
+    assert store2 is None  # unchanged since the just-finished build
+    (docs_dir / "extra.md").write_text("# Extra\n\nChanged content now.")
+    store3 = ingest.build_index(s, source, incremental=True)
+    assert store3 is not None
+    assert store3.index.ntotal == n1  # same file count, rebuilt
+
+
+def test_manifest_written_on_ingest(_indexed):
+    manifest = json.loads(
+        (_indexed.index_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["documents"]
+    assert all("sha256" in v for v in manifest["documents"].values())
+
+
+def test_stream_ask_yields_tokens_then_answer(_indexed):
+    from rag_demo.chain import stream_ask
+
+    events = list(stream_ask("What is the max parcel weight?", _indexed))
+    tokens = [e["token"] for e in events if "token" in e]
+    answers = [e["answer"] for e in events if "answer" in e]
+    assert tokens and "".join(tokens)
+    assert len(answers) == 1
+    assert answers[0].text == "".join(tokens)
+    assert answers[0].sources
+
+
+def test_system_prompt_handles_small_talk():
+    from rag_demo.chain import SYSTEM
+
+    assert "greetings" in SYSTEM and "briefly and naturally" in SYSTEM
+
+
+def test_cli_keeps_history(monkeypatch):
+    import rag_demo.cli as cli
+
+    inputs = iter(["first question", "/quit"])
+    outputs = []
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    monkeypatch.setattr("builtins.print", lambda *a, **k: outputs.append(" ".join(map(str, a))))
+    monkeypatch.setenv("RAG_DEMO_FAKE", "1")
+    # Run against a fake settings with no index needed — ask() is monkeypatched.
+    from rag_demo.chain import Answer
+
+    monkeypatch.setattr(
+        cli, "ask", lambda q, settings, history=None: Answer(text="ok", sources=[], hits=[])
+    )
+    cli.main()
+    assert any("ok" in o for o in outputs)

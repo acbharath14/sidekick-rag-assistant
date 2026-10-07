@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 
 from langchain_community.vectorstores import FAISS
@@ -18,6 +19,14 @@ INDEX_DIRS = {
     "github-docs": ".faiss_index_github",
     "confluence-mock": ".faiss_index_confluence",
 }
+
+
+def _doc_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _doc_id(doc) -> str:
+    return doc.metadata.get("doc_id", doc.metadata.get("source", "?"))
 
 
 def load_documents(settings: Settings):
@@ -36,12 +45,30 @@ def chunk_documents(docs, settings: Settings):
 def build_index(
     settings: Settings | None = None,
     source: DocumentSource | None = None,
-) -> FAISS:
+    incremental: bool = False,
+) -> FAISS | None:
+    """Build the index. With incremental=True, compare document hashes against
+    the manifest and skip the rebuild entirely when nothing changed — the
+    common case for a nightly refresh job."""
     settings = settings or get_settings()
     source = source or MarkdownDirectorySource(settings.docs_dir)
     docs = source.load()
     if not docs:
         raise RuntimeError(f"source {source.name!r} produced no documents")
+    manifest_path = settings.index_dir / "manifest.json"
+    manifest = (
+        json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest_path.exists()
+        else {"documents": {}}
+    )
+    current = {_doc_id(d): _doc_sha(d.page_content) for d in docs}
+    if incremental and manifest.get("documents"):
+        previous = {k: v["sha256"] for k, v in manifest["documents"].items()}
+        if current == previous:
+            print(
+                f"index up to date ({len(current)} docs from {source.name!r}) — nothing to do"
+            )
+            return None
     chunks = chunk_documents(docs, settings)
     store = FAISS.from_documents(chunks, get_embeddings(settings))
     settings.index_dir.mkdir(parents=True, exist_ok=True)
@@ -61,6 +88,18 @@ def build_index(
                 for c in chunks
             ],
             ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "documents": {
+                    doc_id: {"sha256": sha}
+                    for doc_id, sha in current.items()
+                }
+            },
+            indent=1,
         ),
         encoding="utf-8",
     )
@@ -85,6 +124,11 @@ def main() -> None:
         default=None,
         help="with --source github-docs, the repo as owner/name "
         "(or set RAG_DEMO_GITHUB_REPO)",
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="skip the rebuild when no documents changed (nightly refresh)",
     )
     args = parser.parse_args()
 
@@ -111,7 +155,9 @@ def main() -> None:
     else:
         source = MarkdownDirectorySource(settings.docs_dir)
 
-    store = build_index(settings, source)
+    store = build_index(settings, source, incremental=args.incremental)
+    if store is None:
+        return
     print(f"indexed {store.index.ntotal} chunks from {source.name!r} -> {settings.index_dir}")
 
 
