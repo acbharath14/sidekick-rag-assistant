@@ -124,3 +124,91 @@ def test_playwright_source_is_registered():
 
     assert SOURCES["playwright-docs"] is PlaywrightDocsSource
     assert SOURCES["meridian"].__name__ == "MarkdownDirectorySource"
+
+
+def test_rrf_fuse_orders_by_rank():
+    from rag_demo.retriever import Hit, rrf_fuse
+
+    a = Hit(text="doc-a", source="a.md", score=0.0)
+    b = Hit(text="doc-b", source="b.md", score=0.0)
+    fused = rrf_fuse([[a, b], [a]], k=2)
+    assert [h.source for h in fused] == ["a.md", "b.md"]
+    assert fused[0].score > fused[1].score
+
+
+def test_rrf_fuse_dedupes_by_text_and_source():
+    from rag_demo.retriever import Hit, rrf_fuse
+
+    a1 = Hit(text="same", source="a.md", score=0.0)
+    a2 = Hit(text="same", source="a.md", score=0.0)
+    fused = rrf_fuse([[a1], [a2]], k=2)
+    assert len(fused) == 1
+    # ranked 1st in both lists: 2 * 1/(60+1)
+    assert fused[0].score == pytest.approx(2 / 61)
+
+
+def test_chunks_json_written_on_ingest(_indexed):
+    p = _indexed.index_dir / "chunks.json"
+    assert p.exists(), "ingest should persist chunks.json for hybrid retrieval"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data and all({"text", "source", "doc_id"} <= set(c) for c in data)
+
+
+def test_hybrid_bm25_finds_keyword_doc(_indexed, monkeypatch):
+    # BM25 is deterministic; assert on it directly instead of the fused
+    # ranking (the dense side uses random FakeEmbeddings in tests).
+    monkeypatch.setenv("RAG_DEMO_RETRIEVAL", "hybrid")
+    s = get_settings()
+    s.index_dir = _indexed.index_dir
+    r = Retriever(s)
+    assert r.bm25 is not None
+    hits = r._bm25_search("weight_kg", k=3)
+    assert any(h.source == "api-reference.md" for h in hits)
+
+
+def test_hybrid_search_returns_k_hits(_indexed, monkeypatch):
+    monkeypatch.setenv("RAG_DEMO_RETRIEVAL", "hybrid")
+    s = get_settings()
+    s.index_dir = _indexed.index_dir
+    r = Retriever(s)
+    hits = r.search("weight_kg", k=3)
+    assert len(hits) == 3
+
+
+def test_rewrite_no_history_returns_question_unchanged():
+    from rag_demo.rewrite import rewrite_query
+
+    assert rewrite_query("hello?", [], llm=None) == "hello?"
+
+
+def test_rewrite_uses_history_with_fake_llm():
+    from langchain_core.language_models.fake import FakeListLLM
+
+    from rag_demo.rewrite import rewrite_query
+
+    llm = FakeListLLM(responses=["What is the max parcel weight for express?"])
+    out = rewrite_query(
+        "what about express?",
+        [("What is the max parcel weight?", "1200 kg per parcel")],
+        llm,
+    )
+    assert out == "What is the max parcel weight for express?"
+
+
+def test_reranker_import_is_lazy():
+    # Importing the module must not pull in sentence_transformers/torch (CI).
+    import sys
+
+    assert "sentence_transformers" not in sys.modules
+    import rag_demo.rerank  # noqa: F401
+
+    assert "sentence_transformers" not in sys.modules
+
+
+def test_ask_accepts_history(_indexed):
+    answer = ask(
+        "what about express?",
+        _indexed,
+        history=[("What is the max parcel weight?", "1200 kg per parcel")],
+    )
+    assert answer.text

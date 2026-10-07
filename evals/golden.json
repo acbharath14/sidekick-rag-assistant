@@ -1,1 +1,142 @@
-[{"expected_sources":["api-reference.md"],"notes":"90 days; 401 with token_expired","question":"How long are API tokens valid, and what happens when one expires?"},{"expected_sources":["api-reference.md"],"notes":"1200 kg","question":"What is the maximum weight per parcel when creating a shipment?"},{"expected_sources":["deployment-runbook.md"],"notes":"deploy previous tag; announce in #logistics-ops","question":"How do I roll back a bad production deploy of the tracking service?"},{"expected_sources":["deployment-runbook.md"],"notes":"30 minutes, watch http_5xx_rate","question":"How long should I soak a staging deploy before promoting to prod?"},{"expected_sources":["troubleshooting.md"],"notes":"URL reachable, 5s response, signature verification","question":"My webhooks stopped arriving. What should I check?"},{"expected_sources":["troubleshooting.md"],"notes":"customs or weather; check exception_reason","question":"A shipment is stuck in exception status. What does that mean?"},{"expected_sources":["security-policy.md"],"notes":"30 days then purged","question":"How long are webhook delivery logs retained?"},{"expected_sources":["security-policy.md"],"notes":"security@meridian.example within 1 hour","question":"Who do I contact about a suspected data exposure, and how fast?"},{"expected_sources":["onboarding.md"],"notes":"API reference + security policy data-handling section","question":"What should a new engineer read in week 1?"},{"expected_sources":["onboarding.md"],"notes":"merged, tests green, docs updated, observable in staging","question":"When is a task considered done?"},{"expected_sources":["api-reference.md"],"notes":"label_created → in_transit → out_for_delivery → delivered","question":"What statuses can a shipment be in, in order?"},{"expected_sources":["api-reference.md"],"notes":"HMAC-SHA256, X-Meridian-Signature header","question":"How are webhook payloads authenticated?"}]
+[
+ {
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "90 days; 401 with token_expired",
+  "question": "How long are API tokens valid, and what happens when one expires?"
+ },
+ {
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "1200 kg",
+  "question": "What is the maximum weight per parcel when creating a shipment?"
+ },
+ {
+  "expected_sources": [
+   "deployment-runbook.md"
+  ],
+  "notes": "deploy previous tag; announce in #logistics-ops",
+  "question": "How do I roll back a bad production deploy of the tracking service?"
+ },
+ {
+  "expected_sources": [
+   "deployment-runbook.md"
+  ],
+  "notes": "30 minutes, watch http_5xx_rate",
+  "question": "How long should I soak a staging deploy before promoting to prod?"
+ },
+ {
+  "expected_sources": [
+   "troubleshooting.md"
+  ],
+  "notes": "URL reachable, 5s response, signature verification",
+  "question": "My webhooks stopped arriving. What should I check?"
+ },
+ {
+  "expected_sources": [
+   "troubleshooting.md"
+  ],
+  "notes": "customs or weather; check exception_reason",
+  "question": "A shipment is stuck in exception status. What does that mean?"
+ },
+ {
+  "expected_sources": [
+   "security-policy.md"
+  ],
+  "notes": "30 days then purged",
+  "question": "How long are webhook delivery logs retained?"
+ },
+ {
+  "expected_sources": [
+   "security-policy.md"
+  ],
+  "notes": "security@meridian.example within 1 hour",
+  "question": "Who do I contact about a suspected data exposure, and how fast?"
+ },
+ {
+  "expected_sources": [
+   "onboarding.md"
+  ],
+  "notes": "API reference + security policy data-handling section",
+  "question": "What should a new engineer read in week 1?"
+ },
+ {
+  "expected_sources": [
+   "onboarding.md"
+  ],
+  "notes": "merged, tests green, docs updated, observable in staging",
+  "question": "When is a task considered done?"
+ },
+ {
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "label_created \u2192 in_transit \u2192 out_for_delivery \u2192 delivered",
+  "question": "What statuses can a shipment be in, in order?"
+ },
+ {
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "HMAC-SHA256, X-Meridian-Signature header",
+  "question": "How are webhook payloads authenticated?"
+ },
+ {
+  "question": "What is the exact JSON field name for billable weight in the create shipment request?",
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "weight_kg \u2014 keyword-heavy, favors BM25"
+ },
+ {
+  "question": "Which HTTP header carries the webhook signature?",
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "X-Meridian-Signature"
+ },
+ {
+  "question": "What is the eta_days value in the example 201 Created shipment response?",
+  "expected_sources": [
+   "api-reference.md"
+  ],
+  "notes": "4"
+ },
+ {
+  "question": "What does the exception_reason field tell you about a stuck shipment?",
+  "expected_sources": [
+   "troubleshooting.md"
+  ],
+  "notes": "customs or weather reason code"
+ },
+ {
+  "question": "Which Slack channel is mentioned for deploy announcements?",
+  "expected_sources": [
+   "deployment-runbook.md"
+  ],
+  "notes": "#logistics-ops"
+ },
+ {
+  "question": "What must be attached at creation time to avoid customs holds?",
+  "expected_sources": [
+   "troubleshooting.md"
+  ],
+  "notes": "commercial invoice"
+ },
+ {
+  "question": "After rolling back a bad deploy, what must I announce and where?",
+  "expected_sources": [
+   "deployment-runbook.md"
+  ],
+  "notes": "announce in #logistics-ops"
+ },
+ {
+  "question": "The API returns 429 Too Many Requests. What limit did I hit and what should I do?",
+  "expected_sources": [
+   "troubleshooting.md"
+  ],
+  "notes": "100-requests-per-minute; read Retry-After and back off"
+ }
+]
