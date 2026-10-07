@@ -637,3 +637,25 @@ def test_ask_marks_fallback_answer_ungrounded(_indexed, monkeypatch):
     ans = ask("What is the capital of France?", _indexed)
     assert ans.grounded is False
     assert ans.text.startswith("🌐")
+
+
+def test_rewrite_strips_think_blocks():
+    from rag_demo.rewrite import rewrite_query
+
+    class FakeLLM:
+        def invoke(self, prompt):
+            return "<think>Let me think about this.</think>\nWhat is the max parcel weight for express?"
+
+    out = rewrite_query(
+        "what about express?",
+        [("What is the max parcel weight?", "1200 kg per parcel")],
+        FakeLLM(),
+    )
+    assert out == "What is the max parcel weight for express?"
+    assert "<think>" not in out
+
+
+def test_rewrite_no_history_is_passthrough():
+    from rag_demo.rewrite import rewrite_query
+
+    assert rewrite_query("hello?", [], llm=None) == "hello?"

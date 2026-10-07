@@ -28,4 +28,12 @@ def rewrite_query(question: str, history: list[tuple[str, str]], llm) -> str:
     prompt = REWRITE_PROMPT.format(history=format_history(history), question=question)
     out = llm.invoke(prompt)
     text = out.content if hasattr(out, "content") else str(out)
-    return text.strip().strip('"')
+    # Strip reasoning blocks (qwen3 et al. emit <think>…</think>); the
+    # retriever needs just the standalone question.
+    import re
+
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Take the last non-empty line — models sometimes echo the prompt.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    text = lines[-1] if lines else text
+    return text.strip().strip('"').removeprefix("Standalone question:").strip()

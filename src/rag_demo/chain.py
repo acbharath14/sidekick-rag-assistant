@@ -44,6 +44,7 @@ class Answer:
     hits: list[Hit]
     latency_ms: float | None = None
     grounded: bool = True  # False when answered from general knowledge (hybrid)
+    standalone_question: str | None = None  # rewritten follow-up, if any
 
 
 def format_hits(hits: list[Hit]) -> str:
@@ -118,6 +119,7 @@ def ask(
         hits=hits,
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
+        standalone_question=standalone if standalone != question else None,
     )
     log_question(settings, question, answer, latency_ms)
     return answer
@@ -165,6 +167,7 @@ def stream_ask(
         hits=hits,
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
+        standalone_question=standalone if standalone != question else None,
     )
     log_question(settings, question, answer, latency_ms)
     yield {"answer": answer}

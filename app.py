@@ -458,6 +458,8 @@ if question and index_ok:
             )
         if not answer.grounded:
             st.markdown(FALLBACK_BADGE, unsafe_allow_html=True)
+        if answer.standalone_question:
+            st.caption(f"🔍 Understood as: {answer.standalone_question}")
         with st.expander("Retrieved passages"):
             for h in answer.hits:
                 st.markdown(f"**[{h.source}]** (score {h.score:.3f})")
