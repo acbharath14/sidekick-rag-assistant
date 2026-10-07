@@ -60,6 +60,28 @@ class Settings:
     rewrite_enabled: bool = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_REWRITE", "1") == "1"
     )
+    # GitHub connector: token (never committed) and default repo.
+    github_token: str | None = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_TOKEN")
+    )
+    github_repo: str = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_REPO", "")
+    )
+    # Groups the asker belongs to, for permission-aware retrieval.
+    user_groups: list[str] = field(
+        default_factory=lambda: [
+            g.strip()
+            for g in os.environ.get("RAG_DEMO_USER_GROUPS", "").split(",")
+            if g.strip()
+        ]
+    )
+    # Opt-in JSONL audit log path.
+    audit_log_path: str | None = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_AUDIT_LOG")
+    )
+    audit_log_answers: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_AUDIT_LOG_ANSWERS") == "1"
+    )
 
     @property
     def fake(self) -> bool:

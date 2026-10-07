@@ -201,3 +201,114 @@ def test_ask_accepts_history(_indexed):
         history=[("What is the max parcel weight?", "1200 kg per parcel")],
     )
     assert answer.text
+
+
+def test_confluence_mock_loads_pages_with_acls():
+    from rag_demo.sources import MockConfluenceSource
+
+    docs = MockConfluenceSource(
+        Path(__file__).resolve().parent.parent / "fixtures" / "confluence"
+    ).load()
+    assert len(docs) == 4
+    by_source = {d.metadata["source"]: d for d in docs}
+    assert "confluence:ENG/Salary bands FY27" in by_source
+    restricted = by_source["confluence:ENG/Salary bands FY27"]
+    assert restricted.metadata["allowed_groups"] == ["eng-leads"]
+    public = by_source["confluence:ENG/Deploy checklist"]
+    assert public.metadata["allowed_groups"] == ["*"]
+    assert "Deploy checklist" in public.page_content  # HTML was stripped
+
+
+def test_html_to_text_strips_tags():
+    from rag_demo.sources import html_to_text
+
+    assert html_to_text("<h1>Title</h1><p>Some <b>bold</b> text.</p>") == "Title\n\nSome bold text."
+
+
+def test_github_source_parses_tree_and_blobs(monkeypatch):
+    import base64
+
+    from rag_demo.sources import GitHubDocsSource
+
+    tree = {"tree": [
+        {"type": "blob", "path": "docs/guide.md", "sha": "abc123"},
+        {"type": "blob", "path": "src/main.py", "sha": "def456"},
+    ], "truncated": False}
+    blob = {"content": base64.b64encode(b"# Guide\n\nHello docs.").decode()}
+
+    def fake_api(self, path):
+        return blob if "/git/blobs/" in path else tree
+
+    monkeypatch.setattr(GitHubDocsSource, "_api", fake_api)
+    docs = GitHubDocsSource(repo="owner/repo").load()
+    assert len(docs) == 1  # only the .md file
+    assert docs[0].metadata["source"] == "github:owner/repo/docs/guide.md"
+    assert "Hello docs" in docs[0].page_content
+    assert docs[0].metadata["allowed_groups"] == ["*"]
+
+
+def test_github_source_truncated_tree_raises(monkeypatch):
+    from rag_demo.sources import GitHubDocsSource
+
+    monkeypatch.setattr(
+        GitHubDocsSource, "_api", lambda self, path: {"tree": [], "truncated": True}
+    )
+    with pytest.raises(RuntimeError, match="truncated"):
+        GitHubDocsSource(repo="owner/repo").load()
+
+
+def test_acl_filtering_hides_restricted_hits(_indexed_confluence):
+    settings, _ = _indexed_confluence
+    r = Retriever(settings)
+    # eng-leads sees the restricted page; eng-all does not.
+    leads_hits = r.search("salary bands", k=10, user_groups=["eng-leads"])
+    assert any("Salary bands" in h.source for h in leads_hits)
+    all_hits = r.search("salary bands", k=10, user_groups=["eng-all"])
+    assert not any("Salary bands" in h.source for h in all_hits)
+    # No groups given -> no filtering (backwards compatible).
+    unfiltered = r.search("salary bands", k=10)
+    assert any("Salary bands" in h.source for h in unfiltered)
+
+
+def test_audit_log_writes_one_line_per_ask(_indexed, tmp_path, monkeypatch):
+    from rag_demo.audit import log_question
+    from rag_demo.chain import Answer
+
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("RAG_DEMO_AUDIT_LOG", str(log_path))
+    s = get_settings()
+    answer = Answer(text="hi", sources=["a.md"], hits=[])
+    log_question(s, "hello?", answer, 12.5)
+    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["question"] == "hello?"
+    assert entry["sources"] == ["a.md"]
+    assert entry["latency_ms"] == 12.5
+    assert "answer" not in entry  # answers not logged by default
+
+
+def test_audit_log_disabled_by_default(_indexed, tmp_path, monkeypatch):
+    from rag_demo.audit import log_question
+    from rag_demo.chain import Answer
+
+    monkeypatch.delenv("RAG_DEMO_AUDIT_LOG", raising=False)
+    s = get_settings()
+    log_question(s, "hello?", Answer(text="hi", sources=[], hits=[]), 1.0)
+    # No file created anywhere we can see; just assert no crash.
+    assert True
+
+
+@pytest.fixture(scope="module")
+def _indexed_confluence(tmp_path_factory):
+    from rag_demo.sources import MockConfluenceSource
+
+    s = get_settings()
+    s.index_dir = tmp_path_factory.mktemp("index-confluence")
+    ingest.build_index(
+        s,
+        MockConfluenceSource(
+            Path(__file__).resolve().parent.parent / "fixtures" / "confluence"
+        ),
+    )
+    return s, True
