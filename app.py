@@ -228,27 +228,40 @@ with st.sidebar:
         elif st.session_state.get("upload_name") != uploaded.name:
             from rag_demo.extract import UnsupportedFormat, extract_text
 
+            data = uploaded.read()
             try:
-                text = extract_text(uploaded.name, uploaded.read())
+                text = extract_text(uploaded.name, data)
             except UnsupportedFormat as e:
                 st.error(str(e))
             except Exception as e:  # noqa: BLE001 — corrupt/encrypted files
                 st.error(f"Couldn't read {uploaded.name}: {e}")
             else:
+                ocr_used = False
+                if not text.strip() and uploaded.name.lower().endswith(".pdf"):
+                    from rag_demo.ocr import ocr_available, ocr_pdf
+
+                    if ocr_available():
+                        with st.spinner("No embedded text — running OCR…"):
+                            try:
+                                text = ocr_pdf(data)
+                                ocr_used = bool(text.strip())
+                            except RuntimeError as e:
+                                st.warning(str(e))
                 if not text.strip():
                     st.warning(
-                        f"No text found in {uploaded.name}. This usually means "
-                        "it's a scanned PDF (images of text, not real text) — "
-                        "try a text-based PDF, or copy the text into a .txt file."
+                        f"No text found in {uploaded.name}. It's likely a scanned "
+                        "PDF — install OCR support (conda install -c conda-forge "
+                        "tesseract poppler), or copy the text into a .txt file."
                     )
                 else:
                     st.session_state.upload_name = uploaded.name
                     st.session_state.upload_text = text
                     st.session_state.upload_summary = None
                     st.session_state.upload_retriever = None
-                    st.success(
-                        f"Extracted {len(text):,} characters from {uploaded.name}."
-                    )
+                    msg = f"Extracted {len(text):,} characters from {uploaded.name}."
+                    if ocr_used:
+                        msg += " (via OCR — may contain recognition errors)"
+                    st.success(msg)
     if st.session_state.get("upload_text"):
         if st.button("📝 Summarize", use_container_width=True):
             from rag_demo.summarize import summarize

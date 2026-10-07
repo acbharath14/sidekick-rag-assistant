@@ -659,3 +659,21 @@ def test_rewrite_no_history_is_passthrough():
     from rag_demo.rewrite import rewrite_query
 
     assert rewrite_query("hello?", [], llm=None) == "hello?"
+
+
+def test_ocr_available_returns_bool():
+    from rag_demo.ocr import ocr_available
+
+    assert isinstance(ocr_available(), bool)
+
+
+def test_ocr_pdf_helpful_error_without_backend(monkeypatch):
+    import sys
+
+    from rag_demo.ocr import ocr_pdf
+
+    # Simulate missing Python wrappers: imports fail -> clear RuntimeError.
+    monkeypatch.setitem(sys.modules, "pdf2image", None)
+    monkeypatch.setitem(sys.modules, "pytesseract", None)
+    with pytest.raises(RuntimeError, match="tesseract and poppler"):
+        ocr_pdf(b"not a real pdf")

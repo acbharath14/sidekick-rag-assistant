@@ -140,6 +140,15 @@ or **Run all** for the whole suite. Same cases as the CLI runner
 
 ### Upload a document
 
+Upload a PDF, DOCX, TXT, MD, or CSV from the sidebar: it's extracted
+in-memory, summarized on demand, and queryable without touching the main
+index. **Scanned PDFs** (images, no embedded text) fall back to Tesseract
+OCR automatically — first install the binaries:
+
+```bash
+conda install -c conda-forge tesseract poppler
+```
+
 In the Streamlit sidebar: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
 10 MB cap). The app extracts the text in memory, offers a **📝 Summarize**
 button (map-reduce for long docs), and **💬 Ask about this file** builds an
