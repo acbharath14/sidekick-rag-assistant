@@ -232,12 +232,23 @@ with st.sidebar:
                 text = extract_text(uploaded.name, uploaded.read())
             except UnsupportedFormat as e:
                 st.error(str(e))
+            except Exception as e:  # noqa: BLE001 — corrupt/encrypted files
+                st.error(f"Couldn't read {uploaded.name}: {e}")
             else:
-                st.session_state.upload_name = uploaded.name
-                st.session_state.upload_text = text
-                st.session_state.upload_summary = None
-                st.session_state.upload_retriever = None
-                st.success(f"Extracted {len(text):,} characters from {uploaded.name}.")
+                if not text.strip():
+                    st.warning(
+                        f"No text found in {uploaded.name}. This usually means "
+                        "it's a scanned PDF (images of text, not real text) — "
+                        "try a text-based PDF, or copy the text into a .txt file."
+                    )
+                else:
+                    st.session_state.upload_name = uploaded.name
+                    st.session_state.upload_text = text
+                    st.session_state.upload_summary = None
+                    st.session_state.upload_retriever = None
+                    st.success(
+                        f"Extracted {len(text):,} characters from {uploaded.name}."
+                    )
     if st.session_state.get("upload_text"):
         if st.button("📝 Summarize", use_container_width=True):
             from rag_demo.summarize import summarize
