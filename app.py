@@ -394,7 +394,7 @@ for msg in st.session_state.messages:
 
 # ------------------------------------------------------------------ chat ---
 question = st.session_state.pop("pending_question", None) or st.chat_input(
-    "Ask about the corpus…", disabled=not index_ok
+    "Ask anything…", disabled=not index_ok
 )
 reg_case = st.session_state.pop("pending_case", None)
 if question and index_ok:
