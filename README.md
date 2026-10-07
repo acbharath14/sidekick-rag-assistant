@@ -42,7 +42,15 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 |---|---|---|
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local, no key) | `RAG_DEMO_EMBEDDINGS=fake` |
 | LLM | Ollama `qwen3:8b` at `localhost:11434` | `RAG_DEMO_MODEL`, `RAG_DEMO_BASE_URL` |
+| Retrieval | dense vector search | `RAG_DEMO_RETRIEVAL=hybrid` (BM25+dense) |
+| Rerank | off | `RAG_DEMO_RERANK=1` (cross-encoder, downloads once) |
 | Tests/CI | deterministic fakes | `RAG_DEMO_FAKE=1` |
+
+> **Intel Mac note:** PyTorch ships no Intel-macOS wheels past 2.2.2, and
+> Ollama can't use AMD GPUs (Metal backend is Apple-Silicon-only), so this
+> machine runs everything on CPU. `requirements.txt` pins the compatible
+> trio (`numpy<2`, `transformers<5`) automatically. For snappier answers on
+> CPU, try `RAG_DEMO_MODEL=qwen2.5-coder:7b`.
 
 ## Quickstart
 
@@ -69,16 +77,42 @@ PYTHONPATH=src python -m evals.eval_retrieval
 RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 ```
 
-### Optional: index the real Playwright docs
+### Optional: other corpora
 
 ```bash
+# Real Playwright docs (sparse checkout at a pinned tag)
 PYTHONPATH=src python -m rag_demo.ingest --source playwright-docs --language python
+
+# Any GitHub repo's markdown docs via the API (public repos need no token)
+PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo owner/name
+# Private repos: export RAG_DEMO_GITHUB_TOKEN=<token>  (never commit it)
+
+# Simulated Confluence (JSON fixtures mirroring the REST API shape)
+PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
 ```
 
-Sparse-checkouts `docs/src/*.md` from `microsoft/playwright` at a pinned tag
-into a separate index (`.faiss_index_playwright/`). Needs git + network.
-The Streamlit sidebar lets you switch corpora; the CLI reads
-`RAG_DEMO_INDEX_DIR` if you want it there too.
+Each source gets its own index (`.faiss_index*/`). The Streamlit sidebar
+lets you switch corpora; the CLI reads `RAG_DEMO_INDEX_DIR` if you want it
+there too.
+
+### Try the permission demo
+
+```bash
+PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
+RAG_DEMO_USER_GROUPS=eng-all PYTHONPATH=src streamlit run app.py
+# Ask "What are the salary bands?" -> the model can't see that page.
+# Now restart with RAG_DEMO_USER_GROUPS=eng-leads -> it can.
+```
+
+Restricted chunks are filtered *before* the prompt — the LLM never sees
+what the user may not. See `ARCHITECTURE.md`.
+
+### Nightly refresh
+
+```bash
+# Rebuild only when documents changed (no-op otherwise — cron-friendly)
+PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock --incremental
+```
 
 ## MCP client setup
 
@@ -104,19 +138,26 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 
 ```
 ├── docs/                    # fictional corpus (the default knowledge base)
-├── app.py                   # Streamlit chat UI
+├── app.py                   # Streamlit chat UI (streaming, citations, ACL demo)
+├── .streamlit/config.toml   # UI theme
 ├── ARCHITECTURE.md          # pipeline, connector pattern, scale notes
 ├── src/rag_demo/
 │   ├── config.py            # env-based settings + model factories
-│   ├── sources.py           # DocumentSource interface + implementations
-│   ├── ingest.py            # source → chunks → FAISS (+ --source flag)
-│   ├── retriever.py         # similarity search wrapper
-│   ├── chain.py             # RAG chain with citations
-│   ├── cli.py               # conversational REPL
+│   ├── sources.py           # DocumentSource: meridian, playwright, github, confluence-mock
+│   ├── ingest.py            # source → chunks → FAISS (+ --incremental, per-source indexes)
+│   ├── retriever.py         # dense / hybrid (BM25+RRF) + ACL filtering
+│   ├── rerank.py            # cross-encoder reranking (opt-in)
+│   ├── rewrite.py           # multi-turn query rewriting
+│   ├── chain.py             # RAG chain with citations (+ streaming)
+│   ├── audit.py             # opt-in JSONL audit log
+│   ├── cli.py               # conversational REPL (with history)
 │   └── mcp_server.py        # MCP server (search_docs tool)
+├── fixtures/confluence/     # mock Confluence REST fixtures (incl. restricted page)
 ├── evals/
-│   ├── golden.json          # 12 Q&A pairs with expected source docs
-│   └── eval_retrieval.py    # hit-rate@k, exits non-zero below threshold
+│   ├── golden.json          # 20 Q&A pairs with expected source docs
+│   ├── eval_retrieval.py    # hit-rate@k, exits non-zero below threshold
+│   ├── eval_compare.py      # dense vs hybrid vs hybrid+rerank table
+│   └── baselines.json       # per-mode hit-rate floors
 └── tests/test_rag.py        # pytest suite (fake embeddings/LLM)
 ```
 
@@ -125,10 +166,25 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 - **Your own docs**: point `MarkdownDirectorySource` at any folder
   (`RAG_DEMO_DOCS_DIR`), rebuild the index, done.
 - **A new source**: implement `DocumentSource.load()` (see
-  `PlaywrightDocsSource` for a worked example), add it to `ingest.py`'s
-  `--source` choices.
+  `PlaywrightDocsSource` for a worked example), register it in `SOURCES`,
+  add its index dir to `ingest.INDEX_DIRS`.
 - **Different LLM/embeddings**: `config.py` factories read env vars; add a
   provider there without touching the chain.
+
+## Operations
+
+**Nightly refresh** (cron-friendly — no-op when nothing changed):
+
+```cron
+0 2 * * * cd /path/to/sidekick-rag-assistant && PYTHONPATH=src .venv/bin/python -m rag_demo.ingest --source confluence-mock --incremental
+```
+
+**Credentials**: connectors read secrets from env vars only
+(`RAG_DEMO_GITHUB_TOKEN`). Never commit tokens — `.gitignore` covers `.env`.
+
+**Audit log**: set `RAG_DEMO_AUDIT_LOG=/var/log/rag-demo/audit.jsonl` to record
+one JSON line per question (timestamp, question, sources, groups, model,
+latency). Answer text is excluded unless `RAG_DEMO_AUDIT_LOG_ANSWERS=1`.
 
 ## License
 
