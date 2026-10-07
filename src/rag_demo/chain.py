@@ -61,10 +61,12 @@ def ask(
     settings: Settings | None = None,
     history: list[tuple[str, str]] | None = None,
     user_groups: list[str] | None = None,
+    retriever: Retriever | None = None,
 ) -> Answer:
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
-    settings.user_groups)."""
+    settings.user_groups). retriever: inject a pre-built retriever (e.g.
+    an in-memory upload index)."""
     import time
 
     settings = settings or get_settings()
@@ -76,7 +78,7 @@ def ask(
         else question
     )
     started = time.perf_counter()
-    chain, retriever = build_chain(settings)
+    chain, retriever = build_chain(settings, retriever=retriever)
     text = chain.invoke(standalone)
     hits = retriever.search(standalone, user_groups=user_groups)
     sources = sorted({h.source for h in hits})
@@ -90,6 +92,7 @@ def stream_ask(
     settings: Settings | None = None,
     history: list[tuple[str, str]] | None = None,
     user_groups: list[str] | None = None,
+    retriever: Retriever | None = None,
 ):
     """Streaming variant of ask(). Yields {"token": str} chunks as the LLM
     generates, then a final {"answer": Answer}. Powers st.write_stream."""
@@ -104,7 +107,7 @@ def stream_ask(
         else question
     )
     started = time.perf_counter()
-    chain, retriever = build_chain(settings)
+    chain, retriever = build_chain(settings, retriever=retriever)
     parts: list[str] = []
     try:
         for chunk in chain.stream(standalone):

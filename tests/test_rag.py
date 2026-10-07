@@ -398,3 +398,137 @@ def test_cli_keeps_history(monkeypatch):
     )
     cli.main()
     assert any("ok" in o for o in outputs)
+
+
+def _fixture(name):
+    return Path(__file__).resolve().parent / "fixtures" / name
+
+
+def test_extract_txt():
+    from rag_demo.extract import extract_text
+
+    text = extract_text("sample.txt", b"# Sample\n\nHello from the text fixture.")
+    assert "Hello from the text fixture" in text
+
+
+def _make_pdf_bytes(text: str) -> bytes:
+    """Minimal valid PDF with extractable text (proper xref table)."""
+    stream_body = b"BT /F1 12 Tf 20 100 Td (%s) Tj ET\n" % text.encode()
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(stream_body) + stream_body + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = [b"%PDF-1.4"]
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(sum(len(x) + 1 for x in out))
+        out += [b"%d 0 obj" % i, body, b"endobj"]
+    xref_pos = sum(len(x) + 1 for x in out)
+    out.append(b"xref")
+    out.append(b"0 %d" % (len(objs) + 1))
+    out.append(b"0000000000 65535 f ")
+    out += [b"%010d 00000 n " % off for off in offsets]
+    out.append(b"trailer << /Size %d /Root 1 0 R >>" % (len(objs) + 1))
+    out += [b"startxref", str(xref_pos).encode(), b"%%EOF"]
+    return b"\n".join(out)
+
+
+def test_extract_pdf():
+    from rag_demo.extract import extract_text
+
+    text = extract_text("sample.pdf", _make_pdf_bytes("Hello from the pdf fixture."))
+    assert "Hello from the pdf fixture" in text
+
+
+def test_extract_docx():
+    import io
+
+    from docx import Document
+
+    from rag_demo.extract import extract_text
+
+    buf = io.BytesIO()
+    doc = Document()
+    doc.add_paragraph("Hello from the docx fixture.")
+    doc.save(buf)
+    text = extract_text("notes.docx", buf.getvalue())
+    assert "Hello from the docx fixture" in text
+
+
+def test_extract_csv_renders_table():
+    from rag_demo.extract import extract_text
+
+    text = extract_text("data.csv", b"name,role\nada,engineer\ngrace,lead\n")
+    assert "| name | role |" in text
+    assert "ada" in text
+
+
+def test_extract_unsupported_format_raises():
+    from rag_demo.extract import UnsupportedFormat, extract_text
+
+    with pytest.raises(UnsupportedFormat):
+        extract_text("evil.exe", b"MZ...")
+
+
+def test_summarize_short_doc_single_call():
+    from langchain_core.language_models.fake import FakeListLLM
+
+    from rag_demo.summarize import summarize
+
+    s = get_settings()
+    llm = FakeListLLM(responses=["Short summary."])
+    import rag_demo.summarize as summod
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(summod, "get_llm", lambda settings=None: llm)
+    try:
+        assert summarize("A short document.", s) == "Short summary."
+    finally:
+        monkeypatch.undo()
+
+
+def test_summarize_long_doc_map_reduce():
+    from langchain_core.language_models.fake import FakeListLLM
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    import rag_demo.summarize as summod
+    from rag_demo.summarize import CHUNK_CHARS, summarize
+
+    long_text = ("This is sentence number {}. " * 400).format(*range(400))
+    assert len(long_text) > 6000
+    n_chunks = len(
+        RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_CHARS, chunk_overlap=200
+        ).split_text(long_text)
+    )
+    llm = FakeListLLM(responses=["- bullet"] * n_chunks + ["FINAL SUMMARY"])
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(summod, "get_llm", lambda settings=None: llm)
+    try:
+        out = summarize(long_text, get_settings())
+        assert out == "FINAL SUMMARY"
+    finally:
+        monkeypatch.undo()
+
+
+def test_retriever_accepts_injected_store(_indexed):
+    from langchain_community.vectorstores import FAISS
+
+    from rag_demo.config import get_embeddings
+    from rag_demo.retriever import Retriever
+
+    store = FAISS.from_texts(
+        ["injected document about wombats"],
+        get_embeddings(_indexed),
+        metadatas=[{"source": "upload:test.txt", "allowed_groups": ["*"]}],
+    )
+    r = Retriever(_indexed, store=store, chunks=[
+        {"text": "injected document about wombats", "source": "upload:test.txt",
+         "allowed_groups": ["*"]}
+    ])
+    hits = r.search("wombats", k=1)
+    assert hits and hits[0].source == "upload:test.txt"

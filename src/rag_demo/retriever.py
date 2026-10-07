@@ -64,18 +64,29 @@ def rrf_fuse(rankings: list[list[Hit]], k: int, rrf_k: int = RRF_K) -> list[Hit]
 
 
 class Retriever:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        store=None,
+        chunks: list[dict] | None = None,
+    ):
+        """store/chunks: inject a pre-built index (e.g. an in-memory upload
+        index) instead of loading from settings.index_dir."""
         self.settings = settings or get_settings()
-        if not self.settings.index_dir.exists():
-            raise RuntimeError(
-                f"index not found at {self.settings.index_dir} — run `python -m rag_demo.ingest` first"
+        if store is not None:
+            self.store = store
+            self.chunks = chunks or []
+        else:
+            if not self.settings.index_dir.exists():
+                raise RuntimeError(
+                    f"index not found at {self.settings.index_dir} — run `python -m rag_demo.ingest` first"
+                )
+            self.store = FAISS.load_local(
+                str(self.settings.index_dir),
+                get_embeddings(self.settings),
+                allow_dangerous_deserialization=True,
             )
-        self.store = FAISS.load_local(
-            str(self.settings.index_dir),
-            get_embeddings(self.settings),
-            allow_dangerous_deserialization=True,
-        )
-        self.chunks = self._load_chunks()
+            self.chunks = self._load_chunks()
         self.bm25 = None
         if self.settings.retrieval == "hybrid":
             if BM25Okapi is None:
