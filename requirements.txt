@@ -11,3 +11,10 @@ pytest>=8.0
 # source build on x86_64 Macs. Pin the last Intel-wheel release there;
 # other platforms keep resolving the latest.
 cryptography==42.0.8; sys_platform == "darwin" and platform_machine == "x86_64"
+# PyTorch dropped Intel macOS wheels after 2.2.2, and transformers>=5 disables
+# its torch integration unless torch>=2.5. On x86_64 Macs pin the last
+# fully-compatible pairing: torch 2.2.2 needs numpy<2, and transformers 4.x
+# (which pulls sentence-transformers 5.x) is the newest line working with it.
+# Other platforms keep resolving the latest.
+numpy<2; sys_platform == "darwin" and platform_machine == "x86_64"
+transformers<5; sys_platform == "darwin" and platform_machine == "x86_64"
