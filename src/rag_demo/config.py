@@ -46,6 +46,21 @@ class Settings:
         default_factory=lambda: os.environ.get("RAG_DEMO_BASE_URL", "http://localhost:11434")
     )
 
+    # Retrieval: "dense" (default, pure vector search) or "hybrid"
+    # (BM25 + dense with reciprocal rank fusion).
+    retrieval: str = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_RETRIEVAL", "dense")
+    )
+    # Cross-encoder reranking of the top candidates. Opt-in: downloads a small
+    # model on first use, never on CI (RAG_DEMO_FAKE=1 leaves it off).
+    rerank_enabled: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_RERANK") == "1"
+    )
+    # Query rewriting for multi-turn chat. Default on; no-op without history.
+    rewrite_enabled: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_REWRITE", "1") == "1"
+    )
+
     @property
     def fake(self) -> bool:
         return os.environ.get("RAG_DEMO_FAKE") == "1"

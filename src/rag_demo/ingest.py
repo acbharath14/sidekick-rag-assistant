@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -37,6 +38,22 @@ def build_index(
     store = FAISS.from_documents(chunks, get_embeddings(settings))
     settings.index_dir.mkdir(parents=True, exist_ok=True)
     store.save_local(str(settings.index_dir))
+    # Persist the chunk texts alongside the vector index so the BM25 side of
+    # hybrid retrieval can rebuild its corpus without re-reading the source.
+    (settings.index_dir / "chunks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "text": c.page_content,
+                    "source": c.metadata.get("source", "?"),
+                    "doc_id": c.metadata.get("doc_id", c.metadata.get("source", "?")),
+                }
+                for c in chunks
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     return store
 
 

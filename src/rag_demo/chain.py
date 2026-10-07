@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from .config import Settings, get_llm, get_settings
 from .retriever import Hit, Retriever
+from .rewrite import rewrite_query
 
 SYSTEM = """You answer questions using ONLY the context below.
 If the context doesn't contain the answer, say you don't know. Cite the source
@@ -52,10 +53,22 @@ def build_chain(settings: Settings | None = None, retriever: Retriever | None = 
     return chain, retriever
 
 
-def ask(question: str, settings: Settings | None = None) -> Answer:
+def ask(
+    question: str,
+    settings: Settings | None = None,
+    history: list[tuple[str, str]] | None = None,
+) -> Answer:
+    """history: list of (question, answer) tuples for multi-turn context."""
     settings = settings or get_settings()
+    history = history or []
+    llm = get_llm(settings)
+    standalone = (
+        rewrite_query(question, history, llm)
+        if settings.rewrite_enabled and history
+        else question
+    )
     chain, retriever = build_chain(settings)
-    text = chain.invoke(question)
-    hits = retriever.search(question)
+    text = chain.invoke(standalone)
+    hits = retriever.search(standalone)
     sources = sorted({h.source for h in hits})
     return Answer(text=text, sources=sources, hits=hits)
