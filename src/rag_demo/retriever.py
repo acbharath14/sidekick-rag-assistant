@@ -147,29 +147,29 @@ class Retriever:
         rerank: bool | None = None,
         user_groups: list[str] | None = None,
     ) -> list[Hit]:
-        """user_groups: groups the asker belongs to. Hits whose allowed_groups
-        don't intersect are filtered BEFORE the prompt (never rely on the LLM
-        to withhold what it has seen)."""
+        """user_groups: groups the asker belongs to. ACL is default-deny:
+        public ("*") hits are visible to everyone; restricted hits require an
+        explicit group match. Filtering happens BEFORE the prompt — never rely
+        on the LLM to withhold what it has seen."""
         k = k or self.settings.top_k
         rerank = self.settings.rerank_enabled if rerank is None else rerank
         if user_groups is None:
             user_groups = self.settings.user_groups
-        filtering = bool(user_groups)
-        wide = rerank or self.settings.retrieval == "hybrid" or filtering
-        want = FUSION_CANDIDATES if wide else k
+        groups = set(user_groups or [])
+        # ACL filtering always runs (default-deny), so always pull a wide
+        # candidate pool — trimming to k happens after filtering/reranking.
+        want = FUSION_CANDIDATES
         if self.settings.retrieval == "hybrid" and self.bm25 is not None:
             dense = self._dense_search(query, k=FUSION_CANDIDATES)
             bm25 = self._bm25_search(query, k=FUSION_CANDIDATES)
             hits = rrf_fuse([dense, bm25], k=want)
         else:
             hits = self._dense_search(query, k=want)
-        if filtering:
-            groups = set(user_groups)
-            hits = [
-                h
-                for h in hits
-                if "*" in h.allowed_groups or groups & set(h.allowed_groups)
-            ]
+        hits = [
+            h
+            for h in hits
+            if "*" in h.allowed_groups or groups & set(h.allowed_groups)
+        ]
         if rerank:
             hits = self._maybe_rerank(query, hits, k)
         return hits[:k]

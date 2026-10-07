@@ -11,10 +11,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import json
 
 import streamlit as st
 
-from rag_demo.chain import stream_ask
+from evals.regression import check_case
+from rag_demo.audit import log_feedback
+from rag_demo.chain import ask, stream_ask
 from rag_demo.config import get_embeddings, get_settings
 from rag_demo.ingest import INDEX_DIRS
 from rag_demo.sources import SOURCES
@@ -86,6 +91,36 @@ SUGGESTIONS = {
     ],
 }
 
+def _ollama_reachable(base_url: str) -> bool:
+    try:
+        import urllib.request
+
+        urllib.request.urlopen(f"{base_url}/api/tags", timeout=2)
+        return True
+    except Exception:  # noqa: BLE001 — unreachable is a status, not an error
+        return False
+
+
+def _chat_markdown(messages: list[dict]) -> str:
+    lines = ["# Sidekick chat export", ""]
+    for m in messages:
+        lines.append(f"## {'You' if m['role'] == 'user' else 'Sidekick'}")
+        lines.append(m["text"])
+        if m.get("sources"):
+            lines.append(f"*Sources: {', '.join(m['sources'])}*")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _load_regression_cases() -> list[dict]:
+    """Standard prompts shared with evals/regression.py (single source of truth)."""
+    path = Path(__file__).resolve().parent / "evals" / "regression_cases.json"
+    try:
+        return json.loads(path.read_text())
+    except OSError:
+        return []
+
+
 # ---------------------------------------------------------------- sidebar ---
 with st.sidebar:
     st.header("📚 Sidekick")
@@ -123,6 +158,14 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.history = []
         st.rerun()
+    if st.session_state.get("messages"):
+        st.download_button(
+            "📥 Export chat",
+            data=_chat_markdown(st.session_state.messages),
+            file_name="sidekick-chat.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
     st.divider()
     st.subheader("Engine")
@@ -132,6 +175,32 @@ with st.sidebar:
         f"**Retrieval** `{settings.retrieval}`"
         + (" + rerank" if settings.rerank_enabled else "")
     )
+    if settings.fake or settings.llm_provider != "ollama":
+        st.caption("🎭 Fake LLM (RAG_DEMO_FAKE=1)")
+    elif _ollama_reachable(settings.ollama_base_url):
+        st.caption("🟢 Ollama connected")
+    else:
+        st.caption("🔴 Ollama unreachable — start it with `ollama serve`")
+
+    st.divider()
+    with st.expander("🧪 Regression prompts"):
+        st.caption(
+            "Standard prompts through the full pipeline, with live checks. "
+            "Targets the Meridian demo corpus."
+        )
+        if st.button("▶ Run all", key="reg-run-all", use_container_width=True):
+            st.session_state["reg_run_all"] = True
+            st.rerun()
+        for _case in _load_regression_cases():
+            if st.button(
+                f"▶ {_case['id']}",
+                key=f"reg-{_case['id']}",
+                help=_case["question"],
+                use_container_width=True,
+            ):
+                st.session_state.pending_question = _case["question"]
+                st.session_state.pending_case = _case
+                st.rerun()
 
     st.divider()
     st.subheader("📎 Upload a document")
@@ -213,6 +282,55 @@ if "history" not in st.session_state:
 
 index_ok = settings.index_dir.exists() or upload_retriever is not None
 
+# ------------------------------------------------------- regression run-all ---
+if st.session_state.pop("reg_run_all", False) and index_ok:
+    _cases = _load_regression_cases()
+    _results: list[dict] = []
+    _progress = st.progress(0, text="Running regression suite…")
+    for _i, _case in enumerate(_cases):
+        try:
+            _ans = ask(
+                _case["question"],
+                settings,
+                history=[tuple(h) for h in _case.get("history", [])],
+                user_groups=groups,
+                retriever=upload_retriever,
+            )
+            _checks = check_case(_case, _ans, real_llm=not settings.fake)
+            _results.append(
+                {
+                    "id": _case["id"],
+                    "ok": all(_p for _, _p in _checks),
+                    "checks": _checks,
+                    "sources": _ans.sources,
+                }
+            )
+        except Exception as e:  # noqa: BLE001 — a crash is a failed case
+            _results.append({"id": _case["id"], "ok": False, "error": str(e)})
+        _progress.progress((_i + 1) / len(_cases), text=f"Ran {_case['id']}…")
+    _progress.empty()
+    st.session_state.reg_results = _results
+    st.rerun()
+
+if st.session_state.get("reg_results"):
+    _results = st.session_state.reg_results
+    _passed = sum(1 for _r in _results if _r["ok"])
+    with st.expander(
+        f"🧪 Regression results: {_passed}/{len(_results)} passed", expanded=True
+    ):
+        for _r in _results:
+            _mark = "✅" if _r["ok"] else "❌"
+            if _r.get("error"):
+                st.markdown(f"{_mark} `{_r['id']}` — crashed: {_r['error']}")
+                continue
+            with st.expander(f"{_mark} `{_r['id']}`", expanded=False):
+                for _name, _passed_check in _r["checks"]:
+                    st.markdown(f"{'✓' if _passed_check else '✗'} {_name}")
+                st.caption(f"sources: {_r['sources']}")
+        if st.button("Dismiss results"):
+            st.session_state.pop("reg_results", None)
+            st.rerun()
+
 # ------------------------------------------------------------------ summary ---
 if st.session_state.get("upload_summary"):
     with st.expander("📝 Document summary", expanded=True):
@@ -250,6 +368,10 @@ for msg in st.session_state.messages:
                 f'<span class="citation-pill">{s}</span>' for s in msg["sources"]
             )
             st.markdown(pills, unsafe_allow_html=True)
+        if msg.get("latency_ms") is not None:
+            st.caption(
+                f"⚡ {msg['latency_ms']/1000:.1f}s · {len(msg.get('hits', []))} passages"
+            )
         if msg.get("hits"):
             with st.expander("Retrieved passages"):
                 for h in msg["hits"]:
@@ -258,32 +380,45 @@ for msg in st.session_state.messages:
         if msg["role"] == "assistant" and msg.get("text"):
             with st.expander("📋 Copyable answer"):
                 st.code(msg["text"], language="markdown")
+        if msg.get("checks"):
+            _ok = all(_p for _, _p in msg["checks"])
+            with st.expander(
+                f"{'✅' if _ok else '❌'} Regression checks ({msg.get('case_id')})"
+            ):
+                for _name, _passed in msg["checks"]:
+                    st.markdown(f"{'✓' if _passed else '✗'} {_name}")
 
 # ------------------------------------------------------------------ chat ---
 question = st.session_state.pop("pending_question", None) or st.chat_input(
     "Ask about the corpus…", disabled=not index_ok
 )
+reg_case = st.session_state.pop("pending_case", None)
 if question and index_ok:
+    # Regression runs use the case's canned history (e.g. the follow-up case).
+    ask_history = (
+        [tuple(h) for h in reg_case.get("history", [])]
+        if reg_case
+        else st.session_state.history
+    )
     st.session_state.messages.append({"role": "user", "text": question})
     with st.chat_message("user", avatar="🧑"):
         st.markdown(question)
 
     with st.chat_message("assistant", avatar="📚"):
-        answer = None
+        holder: dict = {}
 
         def token_stream():
-            nonlocal answer
             for event in stream_ask(
                 question,
                 settings,
-                history=st.session_state.history,
+                history=ask_history,
                 user_groups=groups,
                 retriever=upload_retriever,
             ):
                 if "token" in event:
                     yield event["token"]
                 else:
-                    answer = event["answer"]
+                    holder["answer"] = event["answer"]
 
         try:
             st.write_stream(token_stream())
@@ -291,6 +426,7 @@ if question and index_ok:
             st.error(f"Couldn't answer: {e}")
             st.stop()
 
+        answer = holder.get("answer")
         if answer is None:
             st.error("Couldn't answer: empty response from the chain.")
             st.stop()
@@ -300,6 +436,10 @@ if question and index_ok:
                 f'<span class="citation-pill">{s}</span>' for s in answer.sources
             )
             st.markdown(pills, unsafe_allow_html=True)
+        if answer.latency_ms is not None:
+            st.caption(
+                f"⚡ {answer.latency_ms/1000:.1f}s · {len(answer.hits)} passages"
+            )
         with st.expander("Retrieved passages"):
             for h in answer.hits:
                 st.markdown(f"**[{h.source}]** (score {h.score:.3f})")
@@ -309,10 +449,26 @@ if question and index_ok:
         fb_col1, fb_col2 = st.columns([1, 1])
         with fb_col1:
             if st.button("👍", key=f"up-{len(st.session_state.messages)}"):
+                log_feedback(settings, question, "up")
                 st.toast("Thanks for the feedback!")
         with fb_col2:
             if st.button("👎", key=f"down-{len(st.session_state.messages)}"):
+                log_feedback(settings, question, "down")
                 st.toast("Thanks — we'll use this to improve retrieval.")
+
+    reg_checks = (
+        check_case(reg_case, answer, real_llm=not settings.fake)
+        if reg_case
+        else None
+    )
+    if reg_checks:
+        with st.expander(
+            f"{'✅' if all(p for _, p in reg_checks) else '❌'} "
+            f"Regression checks ({reg_case['id']})",
+            expanded=True,
+        ):
+            for _name, _passed in reg_checks:
+                st.markdown(f"{'✓' if _passed else '✗'} {_name}")
 
     st.session_state.messages.append(
         {
@@ -320,6 +476,9 @@ if question and index_ok:
             "text": answer.text,
             "sources": answer.sources,
             "hits": answer.hits,
+            "checks": reg_checks,
+            "case_id": reg_case["id"] if reg_case else None,
+            "latency_ms": answer.latency_ms,
         }
     )
     st.session_state.history.append((question, answer.text))

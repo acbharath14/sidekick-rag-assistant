@@ -73,6 +73,11 @@ PYTHONPATH=src python -m rag_demo.cli
 # 3. Evaluate retrieval quality against the golden set
 PYTHONPATH=src python -m evals.eval_retrieval
 
+# 3b. Run the end-to-end regression suite (standard prompts, full pipeline)
+RAG_DEMO_FAKE=1 PYTHONPATH=src python -m evals.regression
+# With Ollama running, also check answer content:
+PYTHONPATH=src python -m evals.regression --real-llm
+
 # 4. Run the test suite (fakes — no models, no keys)
 RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 ```
@@ -105,7 +110,24 @@ RAG_DEMO_USER_GROUPS=eng-all PYTHONPATH=src streamlit run app.py
 ```
 
 Restricted chunks are filtered *before* the prompt — the LLM never sees
-what the user may not. See `ARCHITECTURE.md`.
+what the user may not. ACL is default-deny: with no groups you see public
+docs only. See `ARCHITECTURE.md`.
+
+### Regression prompts (in the UI)
+
+The sidebar has a **🧪 Regression prompts** expander: 8 standard prompts
+(factual Q&A, code-identifier lookup, multi-turn follow-up, abstention,
+small-talk) that run through the full pipeline with live pass/fail checks —
+or **Run all** for the whole suite. Same cases as the CLI runner
+(`python -m evals.regression`), so the two can't drift apart.
+
+### Feedback, export, and health
+
+- 👍/👎 under each answer persist to `feedback.jsonl` (next to the audit log
+  when `RAG_DEMO_AUDIT_LOG` is set) — the start of a golden-set flywheel.
+- **📥 Export chat** in the sidebar downloads the conversation as Markdown.
+- The Engine panel shows **🟢/🔴 Ollama status**, and each answer reports
+  its latency and passage count.
 
 ### Upload a document
 
@@ -168,7 +190,9 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 │   ├── golden.json          # 20 Q&A pairs with expected source docs
 │   ├── eval_retrieval.py    # hit-rate@k, exits non-zero below threshold
 │   ├── eval_compare.py      # dense vs hybrid vs hybrid+rerank table
-│   └── baselines.json       # per-mode hit-rate floors
+│   ├── baselines.json       # per-mode hit-rate floors
+│   ├── regression.py        # end-to-end regression runner (standard prompts)
+│   └── regression_cases.json # 8 demo cases: factual, abstention, small-talk, follow-up
 └── tests/test_rag.py        # pytest suite (fake embeddings/LLM)
 ```
 
