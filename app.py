@@ -559,8 +559,11 @@ if question and index_ok:
 
     with st.chat_message("assistant", avatar="📚"):
         holder: dict = {}
+        thinking = st.empty()
+        thinking.markdown("🧠 *Thinking…*")
 
         def token_stream():
+            first_token = True
             for event in stream_ask(
                 question,
                 settings,
@@ -569,6 +572,9 @@ if question and index_ok:
                 retriever=upload_retriever,
             ):
                 if "token" in event:
+                    if first_token:
+                        thinking.empty()
+                        first_token = False
                     yield event["token"]
                 else:
                     holder["answer"] = event["answer"]
@@ -576,8 +582,11 @@ if question and index_ok:
         try:
             st.write_stream(token_stream())
         except Exception as e:  # noqa: BLE001 — show, don't crash the UI
+            thinking.empty()
             st.error(f"Couldn't answer: {e}")
             st.stop()
+        finally:
+            thinking.empty()
 
         answer = holder.get("answer")
         if answer is None:
