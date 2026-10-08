@@ -1,5 +1,5 @@
 # STATUS — sidekick-rag-assistant
-_Last updated: 2026-10-08_
+_Last updated: 2026-10-08 15:25 EDT_
 
 ## Where things stand
 - All 9 PRs merged to main, CI green, zero open issues — code-complete.
@@ -15,7 +15,7 @@ _Last updated: 2026-10-08_
 ## Next actions (ordered)
 1. iMac: conda-install tesseract + poppler, retest scanned-PDF upload.
 2. Real-model retest: hybrid Paris answer, follow-up rewrite, 9-case regression.
-3. UI enhancement pass (current Streamlit UI underwhelming — needs spec).
+3. UI enhancement pass: spec drafted 2026-10-08, awaiting approval → implement as PRs #10–#12.
 4. Confirm latest main is green in GitHub Actions.
 
 ## Blocked on
