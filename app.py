@@ -42,28 +42,137 @@ st.set_page_config(
 st.markdown(
     """
 <style>
+    /* ---------- Base ---------- */
+    .stApp {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* ---------- Citation pills ---------- */
     .citation-pill {
         display: inline-block;
-        background: #4F46E5;
+        background: linear-gradient(135deg, #6366F1, #8B5CF6);
         color: white;
         border-radius: 999px;
-        padding: 1px 10px;
-        margin: 2px 4px 2px 0;
-        font-size: 0.78rem;
+        padding: 2px 12px;
+        margin: 3px 6px 3px 0;
+        font-size: 0.75rem;
+        font-weight: 500;
         font-family: monospace;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
     }
-    .suggestion-chip button {
-        border-radius: 999px !important;
-    }
+
+    /* ---------- Hero / welcome ---------- */
     .hero-title {
-        font-size: 2.2rem;
-        font-weight: 700;
-        margin-bottom: 0.2rem;
+        font-size: 2.8rem;
+        font-weight: 800;
+        margin-bottom: 0.3rem;
+        background: linear-gradient(135deg, #A5B4FC, #C4B5FD);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: -0.02em;
     }
     .hero-sub {
         color: #94A3B8;
-        font-size: 1.05rem;
-        margin-bottom: 1.5rem;
+        font-size: 1.15rem;
+        margin-bottom: 2rem;
+        font-weight: 400;
+    }
+    .capability-card {
+        background: #1E293B;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 1.2rem;
+        margin-bottom: 1rem;
+        transition: border-color 0.2s, transform 0.2s;
+    }
+    .capability-card:hover {
+        border-color: #6366F1;
+        transform: translateY(-2px);
+    }
+
+    /* ---------- Chat messages ---------- */
+    [data-testid="stChatMessage"] {
+        animation: fadeIn 0.3s ease-in;
+        padding: 1rem 1.2rem !important;
+        border-radius: 16px !important;
+        margin-bottom: 0.8rem !important;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ---------- Sidebar ---------- */
+    [data-testid="stSidebar"] {
+        background: #0B1220 !important;
+    }
+    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+        color: #C4B5FD !important;
+        font-weight: 700 !important;
+        margin-top: 1.2rem !important;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: #1E293B !important;
+        margin: 1rem 0 !important;
+    }
+
+    /* ---------- Buttons ---------- */
+    .stButton > button {
+        border-radius: 10px !important;
+        font-weight: 500 !important;
+        transition: all 0.2s !important;
+        border: 1px solid #334155 !important;
+    }
+    .stButton > button:hover {
+        border-color: #6366F1 !important;
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25) !important;
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #6366F1, #8B5CF6) !important;
+        border: none !important;
+    }
+
+    /* ---------- Expanders ---------- */
+    [data-testid="stExpander"] {
+        border: 1px solid #1E293B !important;
+        border-radius: 10px !important;
+        background: #0F172A !important;
+    }
+
+    /* ---------- Chat input ---------- */
+    [data-testid="stChatInput"] {
+        border-radius: 16px !important;
+    }
+    [data-testid="stChatInput"]:focus-within {
+        border-color: #6366F1 !important;
+        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important;
+    }
+
+    /* ---------- Thinking indicator ---------- */
+    .thinking-dots::after {
+        content: '';
+        animation: dots 1.2s infinite;
+    }
+    @keyframes dots {
+        0%, 20% { content: ''; }
+        40% { content: '.'; }
+        60% { content: '..'; }
+        80%, 100% { content: '...'; }
+    }
+
+    /* ---------- Scrollbar ---------- */
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #0F172A;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #334155;
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #475569;
     }
 </style>
 """,
@@ -179,7 +288,7 @@ with st.sidebar:
     user_groups = st.text_input(
         "Your groups (comma-separated)",
         value=",".join(settings.user_groups),
-        help="Permission-aware retrieval demo: try 'ops-all' vs 'ops-leads' on the Confluence corpus.",
+        help="Permission-aware retrieval demo: try 'eng-all' vs 'eng-leads' on the Confluence corpus.",
     )
     groups = [g.strip() for g in user_groups.split(",") if g.strip()]
     if st.button("➕ New chat", use_container_width=True):
@@ -476,11 +585,17 @@ if not st.session_state.messages:
     )
     st.markdown(
         """
-**What Sidekick can do:**
-- 📚 Answer questions from your corpus — every fact cited to its source
-- 🌐 Fall back to general knowledge when the corpus doesn't cover it (always marked)
-- 📎 Read your uploaded documents — PDF, DOCX, TXT, MD, CSV (OCR for scanned PDFs)
-"""
+<div class="capability-card">
+📚 <strong>Corpus Q&A</strong> — Answers grounded in your documents, every fact cited to its source.
+</div>
+<div class="capability-card">
+🌐 <strong>General knowledge</strong> — Falls back when the corpus doesn't cover it. Always clearly marked.
+</div>
+<div class="capability-card">
+📎 <strong>Your files</strong> — Upload PDF, DOCX, TXT, MD, CSV. Scanned PDFs get OCR automatically.
+</div>
+""",
+        unsafe_allow_html=True,
     )
     if not index_ok:
         st.warning(
@@ -559,8 +674,14 @@ if question and index_ok:
 
     with st.chat_message("assistant", avatar="📚"):
         holder: dict = {}
+        thinking = st.empty()
+        thinking.markdown(
+            '<span class="thinking-dots">🧠 Thinking</span>',
+            unsafe_allow_html=True,
+        )
 
         def token_stream():
+            first_token = True
             for event in stream_ask(
                 question,
                 settings,
@@ -569,6 +690,9 @@ if question and index_ok:
                 retriever=upload_retriever,
             ):
                 if "token" in event:
+                    if first_token:
+                        thinking.empty()
+                        first_token = False
                     yield event["token"]
                 else:
                     holder["answer"] = event["answer"]
@@ -576,8 +700,11 @@ if question and index_ok:
         try:
             st.write_stream(token_stream())
         except Exception as e:  # noqa: BLE001 — show, don't crash the UI
+            thinking.empty()
             st.error(f"Couldn't answer: {e}")
             st.stop()
+        finally:
+            thinking.empty()
 
         answer = holder.get("answer")
         if answer is None:
