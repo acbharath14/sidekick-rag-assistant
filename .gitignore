@@ -7,6 +7,4 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .DS_Store
-# Local secrets (API keys, tokens) must never be committed.
-.env
-.env.*
+chats/
