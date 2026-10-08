@@ -20,6 +20,14 @@ import streamlit as st
 from evals.regression import check_case
 from rag_demo.audit import log_feedback
 from rag_demo.chain import ask, stream_ask
+from rag_demo.chat_store import (
+    delete_chat,
+    list_chats,
+    load_chat,
+    new_chat,
+    rename_chat,
+    save_chat,
+)
 from rag_demo.config import get_embeddings, get_settings
 from rag_demo.ingest import INDEX_DIRS
 from rag_demo.sources import SOURCES
@@ -124,6 +132,23 @@ def _load_regression_cases() -> list[dict]:
         return []
 
 
+def _persist_active_chat() -> None:
+    """Write session-state messages/history back to the active chat file."""
+    chat_id = st.session_state.get("active_chat_id")
+    if not chat_id:
+        return
+    chat = load_chat(chat_id) or {"id": chat_id, "title": "New chat"}
+    chat["messages"] = st.session_state.get("messages", [])
+    chat["history"] = st.session_state.get("history", [])
+    # Auto-title from the first user message.
+    if chat.get("title") in (None, "New chat"):
+        for m in chat["messages"]:
+            if m.get("role") == "user" and m.get("text"):
+                chat["title"] = m["text"][:40]
+                break
+    save_chat(chat)
+
+
 # ---------------------------------------------------------------- sidebar ---
 with st.sidebar:
     st.header("📚 Sidekick")
@@ -157,10 +182,65 @@ with st.sidebar:
         help="Permission-aware retrieval demo: try 'eng-all' vs 'eng-leads' on the Confluence corpus.",
     )
     groups = [g.strip() for g in user_groups.split(",") if g.strip()]
-    if st.button("🧹 New chat", use_container_width=True):
+    if st.button("➕ New chat", use_container_width=True):
+        _persist_active_chat()
+        _chat = new_chat()
+        st.session_state.active_chat_id = _chat["id"]
         st.session_state.messages = []
         st.session_state.history = []
         st.rerun()
+
+    st.divider()
+    st.subheader("💬 Chats")
+    _chat_list = list_chats()
+    if _chat_list:
+        _labels = {c["id"]: c["title"] for c in _chat_list}
+        _ids = [c["id"] for c in _chat_list]
+        _cur = st.session_state.get("active_chat_id")
+        _idx = _ids.index(_cur) if _cur in _ids else 0
+        _picked = st.radio(
+            "Conversations",
+            options=_ids,
+            format_func=lambda cid: _labels.get(cid, cid),
+            index=_idx,
+            label_visibility="collapsed",
+        )
+        if _picked != st.session_state.get("active_chat_id"):
+            _persist_active_chat()
+            st.session_state.active_chat_id = _picked
+            _loaded = load_chat(_picked) or {"messages": [], "history": []}
+            st.session_state.messages = _loaded.get("messages", [])
+            st.session_state.history = _loaded.get("history", [])
+            st.rerun()
+        with st.expander("✏️ Rename / delete"):
+            _new_title = st.text_input(
+                "Title",
+                value=_labels.get(st.session_state.active_chat_id, ""),
+                key="chat-rename",
+            )
+            _rc1, _rc2 = st.columns(2)
+            with _rc1:
+                if st.button("Rename", use_container_width=True):
+                    rename_chat(
+                        st.session_state.active_chat_id, _new_title or "Untitled"
+                    )
+                    st.rerun()
+            with _rc2:
+                if st.button("🗑️ Delete", use_container_width=True):
+                    delete_chat(st.session_state.active_chat_id)
+                    _remaining = list_chats()
+                    if _remaining:
+                        st.session_state.active_chat_id = _remaining[0]["id"]
+                        _loaded = load_chat(_remaining[0]["id"]) or {}
+                        st.session_state.messages = _loaded.get("messages", [])
+                        st.session_state.history = _loaded.get("history", [])
+                    else:
+                        _chat = new_chat()
+                        st.session_state.active_chat_id = _chat["id"]
+                        st.session_state.messages = []
+                        st.session_state.history = []
+                    st.rerun()
+    _search = st.text_input("🔍 Search chat", key="chat-search")
     if st.session_state.get("messages"):
         st.download_button(
             "📥 Export chat",
@@ -309,10 +389,20 @@ with st.sidebar:
             st.rerun()
 
 # ------------------------------------------------------------------ state ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "history" not in st.session_state:
-    st.session_state.history = []
+# Per-chat state: the active chat file is the source of truth; session state
+# holds the working copy.
+if "active_chat_id" not in st.session_state:
+    _chats = list_chats()
+    if _chats:
+        st.session_state.active_chat_id = _chats[0]["id"]
+        _loaded = load_chat(_chats[0]["id"]) or {}
+        st.session_state.messages = _loaded.get("messages", [])
+        st.session_state.history = _loaded.get("history", [])
+    else:
+        _chat = new_chat()
+        st.session_state.active_chat_id = _chat["id"]
+        st.session_state.messages = []
+        st.session_state.history = []
 
 index_ok = settings.index_dir.exists() or upload_retriever is not None
 
@@ -384,21 +474,41 @@ if not st.session_state.messages:
         '<div class="hero-sub">Answers grounded in your indexed corpus — every fact cited.</div>',
         unsafe_allow_html=True,
     )
+    st.markdown(
+        """
+**What Sidekick can do:**
+- 📚 Answer questions from your corpus — every fact cited to its source
+- 🌐 Fall back to general knowledge when the corpus doesn't cover it (always marked)
+- 📎 Read your uploaded documents — PDF, DOCX, TXT, MD, CSV (OCR for scanned PDFs)
+"""
+    )
     if not index_ok:
         st.warning(
             f"No index at `{settings.index_dir}`. Build it first:\n\n"
             "`PYTHONPATH=src python -m rag_demo.ingest --source " + corpus + "`"
         )
     st.write("Try one of these:")
-    cols = st.columns(len(SUGGESTIONS.get(corpus, [])) or 1)
-    for col, suggestion in zip(cols, SUGGESTIONS.get(corpus, [])):
-        with col:
-            if st.button(suggestion, key=f"sug-{suggestion[:20]}", use_container_width=True):
-                st.session_state.pending_question = suggestion
-                st.rerun()
+    _sugs = SUGGESTIONS.get(corpus, [])
+    for _row in range(0, len(_sugs), 2):
+        cols = st.columns(2)
+        for col, suggestion in zip(cols, _sugs[_row : _row + 2]):
+            with col:
+                if st.button(
+                    suggestion,
+                    key=f"sug-{suggestion[:20]}",
+                    use_container_width=True,
+                ):
+                    st.session_state.pending_question = suggestion
+                    st.rerun()
 
 # --------------------------------------------------------------- history ---
+def _hit_field(h, key):
+    return h[key] if isinstance(h, dict) else getattr(h, key)
+
+
 for msg in st.session_state.messages:
+    if _search and _search.lower() not in msg.get("text", "").lower():
+        continue
     with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "📚"):
         st.markdown(msg["text"])
         if msg.get("sources"):
@@ -415,8 +525,11 @@ for msg in st.session_state.messages:
         if msg.get("hits"):
             with st.expander("Retrieved passages"):
                 for h in msg["hits"]:
-                    st.markdown(f"**[{h.source}]** (score {h.score:.3f})")
-                    st.caption(h.text[:500])
+                    st.markdown(
+                        f"**[{_hit_field(h, 'source')}]** "
+                        f"(score {_hit_field(h, 'score'):.3f})"
+                    )
+                    st.caption(_hit_field(h, "text")[:500])
         if msg["role"] == "assistant" and msg.get("text"):
             with st.expander("📋 Copyable answer"):
                 st.code(msg["text"], language="markdown")
@@ -528,3 +641,4 @@ if question and index_ok:
     )
     st.session_state.history.append((question, answer.text))
     st.session_state.history = st.session_state.history[-6:]
+    _persist_active_chat()
