@@ -127,4 +127,5 @@ def get_llm(settings: Settings):
         model=settings.ollama_model,
         base_url=settings.ollama_base_url,
         timeout=300.0,  # fail fast instead of hanging forever on a stalled server
+        keep_alive="30m",  # keep the model in RAM between prompts; avoids reload stalls
     )
