@@ -70,7 +70,7 @@ class Settings:
         default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_TOKEN")
     )
     github_repo: str = field(
-        default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_REPO", "")
+        default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_REPO", "acbharath14/sidekick-rag-assistant")
     )
     # Groups the asker belongs to, for permission-aware retrieval.
     user_groups: list[str] = field(

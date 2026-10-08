@@ -77,8 +77,8 @@ Never rely on the LLM to "know" what the user may see — a model that has
 seen a secret in context *will* leak it under the right prompt. Filter
 before the prompt, not after the answer.
 
-Try it: index `--source confluence-mock`, then ask about "salary bands" with
-`RAG_DEMO_USER_GROUPS=eng-all` (invisible) vs `eng-leads` (visible).
+Try it: index `--source confluence-mock`, then ask about "driver pay bands" with
+`RAG_DEMO_USER_GROUPS=ops-all` (invisible) vs `ops-leads` (visible).
 
 ## Retrieval pipeline (data flow)
 

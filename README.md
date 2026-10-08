@@ -89,7 +89,7 @@ RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 PYTHONPATH=src python -m rag_demo.ingest --source playwright-docs --language python
 
 # Any GitHub repo's markdown docs via the API (public repos need no token)
-PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo owner/name
+PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo acbharath14/sidekick-rag-assistant
 # Private repos: export RAG_DEMO_GITHUB_TOKEN=<token>  (never commit it)
 
 # Simulated Confluence (JSON fixtures mirroring the REST API shape)
@@ -104,9 +104,9 @@ there too.
 
 ```bash
 PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
-RAG_DEMO_USER_GROUPS=eng-all PYTHONPATH=src streamlit run app.py
-# Ask "What are the salary bands?" -> the model can't see that page.
-# Now restart with RAG_DEMO_USER_GROUPS=eng-leads -> it can.
+RAG_DEMO_USER_GROUPS=ops-all PYTHONPATH=src streamlit run app.py
+# Ask "What are the driver pay bands?" -> the model can't see that page.
+# Now restart with RAG_DEMO_USER_GROUPS=ops-leads -> it can.
 ```
 
 Restricted chunks are filtered *before* the prompt — the LLM never sees

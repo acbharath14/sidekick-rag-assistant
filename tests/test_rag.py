@@ -222,12 +222,12 @@ def test_confluence_mock_loads_pages_with_acls():
     ).load()
     assert len(docs) == 4
     by_source = {d.metadata["source"]: d for d in docs}
-    assert "confluence:ENG/Salary bands FY27" in by_source
-    restricted = by_source["confluence:ENG/Salary bands FY27"]
-    assert restricted.metadata["allowed_groups"] == ["eng-leads"]
-    public = by_source["confluence:ENG/Deploy checklist"]
+    assert "confluence:OPS/Driver pay bands FY27" in by_source
+    restricted = by_source["confluence:OPS/Driver pay bands FY27"]
+    assert restricted.metadata["allowed_groups"] == ["ops-leads"]
+    public = by_source["confluence:OPS/TMS deploy checklist"]
     assert public.metadata["allowed_groups"] == ["*"]
-    assert "Deploy checklist" in public.page_content  # HTML was stripped
+    assert "TMS deploy checklist" in public.page_content  # HTML was stripped
 
 
 def test_html_to_text_strips_tags():
@@ -271,15 +271,15 @@ def test_github_source_truncated_tree_raises(monkeypatch):
 def test_acl_filtering_hides_restricted_hits(_indexed_confluence):
     settings, _ = _indexed_confluence
     r = Retriever(settings)
-    # eng-leads sees the restricted page; eng-all does not.
-    leads_hits = r.search("salary bands", k=10, user_groups=["eng-leads"])
-    assert any("Salary bands" in h.source for h in leads_hits)
-    all_hits = r.search("salary bands", k=10, user_groups=["eng-all"])
-    assert not any("Salary bands" in h.source for h in all_hits)
+    # ops-leads sees the restricted page; ops-all does not.
+    leads_hits = r.search("pay bands", k=10, user_groups=["ops-leads"])
+    assert any("Driver pay bands" in h.source for h in leads_hits)
+    all_hits = r.search("pay bands", k=10, user_groups=["ops-all"])
+    assert not any("Driver pay bands" in h.source for h in all_hits)
     # Default-deny: no/empty groups see public docs only, never restricted.
     for groups in (None, []):
         hits = r.search("salary bands", k=10, user_groups=groups)
-        assert not any("Salary bands" in h.source for h in hits)
+        assert not any("Driver pay bands" in h.source for h in hits)
         assert hits  # public docs still visible
 
 
@@ -296,17 +296,17 @@ def test_chain_prompt_never_sees_restricted_text(_indexed_confluence, monkeypatc
         "get_llm",
         lambda s: RunnableLambda(lambda prompt: prompt.to_string()),
     )
-    chain, _, groups = build_chain(settings, user_groups=["eng-all"])
-    assert groups == ["eng-all"]
-    assert "Salary bands" not in chain.invoke("salary bands")
+    chain, _, groups = build_chain(settings, user_groups=["ops-all"])
+    assert groups == ["ops-all"]
+    assert "Driver pay bands" not in chain.invoke("pay bands")
 
-    chain, _, _ = build_chain(settings, user_groups=["eng-leads"])
-    assert "Salary bands" in chain.invoke("salary bands")
+    chain, _, _ = build_chain(settings, user_groups=["ops-leads"])
+    assert "Driver pay bands" in chain.invoke("pay bands")
 
     # Empty groups default-deny at the chain level too.
     chain, _, groups = build_chain(settings, user_groups=[])
     assert groups == []
-    assert "Salary bands" not in chain.invoke("salary bands")
+    assert "Driver pay bands" not in chain.invoke("pay bands")
 
 
 def test_audit_log_writes_one_line_per_ask(_indexed, tmp_path, monkeypatch):
