@@ -722,7 +722,10 @@ if question and index_ok:
             )
         if not answer.grounded:
             st.markdown(FALLBACK_BADGE, unsafe_allow_html=True)
-        if answer.standalone_question:
+        # Only show the rewrite when it led somewhere useful — displaying
+        # "Understood as:" above a "No relevant answer" abstention is confusing.
+        _is_abstention = "no relevant answer" in answer.text.lower()[:80]
+        if answer.standalone_question and not _is_abstention:
             st.caption(f"🔍 Understood as: {answer.standalone_question}")
         with st.expander("Retrieved passages"):
             for h in answer.hits:
