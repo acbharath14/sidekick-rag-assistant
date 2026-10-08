@@ -179,7 +179,7 @@ with st.sidebar:
     user_groups = st.text_input(
         "Your groups (comma-separated)",
         value=",".join(settings.user_groups),
-        help="Permission-aware retrieval demo: try 'eng-all' vs 'eng-leads' on the Confluence corpus.",
+        help="Permission-aware retrieval demo: try 'ops-all' vs 'ops-leads' on the Confluence corpus.",
     )
     groups = [g.strip() for g in user_groups.split(",") if g.strip()]
     if st.button("➕ New chat", use_container_width=True):
