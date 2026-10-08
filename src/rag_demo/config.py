@@ -70,7 +70,7 @@ class Settings:
         default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_TOKEN")
     )
     github_repo: str = field(
-        default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_REPO", "acbharath14/sidekick-rag-assistant")
+        default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_REPO", "")
     )
     # Groups the asker belongs to, for permission-aware retrieval.
     user_groups: list[str] = field(
@@ -123,4 +123,9 @@ def get_llm(settings: Settings):
         )
     from langchain_ollama import OllamaLLM
 
-    return OllamaLLM(model=settings.ollama_model, base_url=settings.ollama_base_url)
+    return OllamaLLM(
+        model=settings.ollama_model,
+        base_url=settings.ollama_base_url,
+        timeout=300.0,  # fail fast instead of hanging forever on a stalled server
+        keep_alive="30m",  # keep the model in RAM between prompts; avoids reload stalls
+    )
