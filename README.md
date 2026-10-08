@@ -138,6 +138,15 @@ or **Run all** for the whole suite. Same cases as the CLI runner
 - The Engine panel shows **🟢/🔴 Ollama status**, and each answer reports
   its latency and passage count.
 
+### Chat management
+
+The sidebar's **💬 Chats** section keeps multiple named conversations —
+switch between them, rename, or delete. Chats persist to `chats/*.json`
+(gitignored) and survive restarts; new chats auto-title from the first
+question. **🔍 Search chat** filters the active conversation. A fresh chat
+opens on a welcome screen describing what Sidekick can do, with clickable
+example prompts.
+
 ### Upload a document
 
 Upload a PDF, DOCX, TXT, MD, or CSV from the sidebar: it's extracted
@@ -238,6 +247,12 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 **Audit log**: set `RAG_DEMO_AUDIT_LOG=/var/log/rag-demo/audit.jsonl` to record
 one JSON line per question (timestamp, question, sources, groups, model,
 latency). Answer text is excluded unless `RAG_DEMO_AUDIT_LOG_ANSWERS=1`.
+
+**Project status**: `STATUS.md` at the repo root is the durable record of
+where things stand, next actions, and decisions — kept current at the end of
+every work session (convention from
+[dev-harness](https://github.com/acbharath14/dev-harness), where this repo is
+the pilot project).
 
 ## License
 
