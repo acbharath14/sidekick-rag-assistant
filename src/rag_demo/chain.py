@@ -32,9 +32,98 @@ your general knowledge — but start your response with exactly this line:
 FALLBACK_MARKERS = ("🌐", "general knowledge")
 
 
+def strip_think(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks (qwen3 et al.).
+
+    Handles unclosed blocks (model cut off mid-reasoning) by dropping
+    everything from <think> onward.
+    """
+    import re
+
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Unclosed think block — drop the trailing reasoning.
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+class ThinkBlockFilter:
+    """Stateful filter stripping <think>...</think> from a token stream.
+
+    Tags may be split across chunks; suppressed content is never yielded.
+    """
+
+    def __init__(self):
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, token: str) -> str:
+        """Feed one token; returns the visible text to yield (may be '')."""
+        self._buf += token
+        out = []
+        while True:
+            if not self._in_think:
+                start = self._buf.find("<think>")
+                if start == -1:
+                    # Keep a tail in case the tag is split across chunks.
+                    if len(self._buf) > 7:
+                        out.append(self._buf[:-7])
+                        self._buf = self._buf[-7:]
+                    break
+                if start > 0:
+                    out.append(self._buf[:start])
+                self._buf = self._buf[start + 7 :]
+                self._in_think = True
+            else:
+                end = self._buf.find("</think>")
+                if end == -1:
+                    if len(self._buf) > 8:
+                        self._buf = self._buf[-8:]
+                    break
+                self._buf = self._buf[end + 8 :]
+                self._in_think = False
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Return any buffered visible text (call at stream end)."""
+        if self._in_think:
+            return ""
+        buf, self._buf = self._buf, ""
+        return buf
+
+
 def is_fallback_answer(text: str) -> bool:
-    head = text.lstrip()[:120].lower()
+    head = strip_think(text).lstrip()[:120].lower()
     return head.startswith("🌐") or "general knowledge" in head
+
+
+ABSTENTION_PHRASES = (
+    "no relevant answer",
+    "don't know",
+    "do not know",
+    "not in the context",
+    "not in context",
+    "cannot answer",
+    "can't answer",
+    "no information",
+)
+
+
+def is_abstention(text: str) -> bool:
+    """Detect when the model declined to answer from context."""
+    head = strip_think(text).lstrip()[:200].lower()
+    return any(p in head for p in ABSTENTION_PHRASES)
+
+
+def general_knowledge_answer(question: str, llm) -> str:
+    """Direct general-knowledge answer, bypassing retrieval."""
+    prompt = (
+        "Answer the following question from your general knowledge. "
+        "Be concise and accurate.\n\nQuestion: " + question
+    )
+    out = llm.invoke(prompt)
+    text = out.content if hasattr(out, "content") else str(out)
+    text = strip_think(text)
+    return "🌐 General knowledge (not from your corpus).\n" + text.strip()
 
 
 @dataclass
@@ -110,6 +199,11 @@ def ask(
         settings, retriever=retriever, user_groups=user_groups
     )
     text = chain.invoke(standalone)
+    text = strip_think(text)
+    # Server-side hybrid fallback: if the model abstained but hybrid is on,
+    # answer from general knowledge instead of showing "No relevant answer".
+    if settings.hybrid_fallback and is_abstention(text):
+        text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     sources = sorted({h.source for h in hits})
@@ -149,16 +243,58 @@ def stream_ask(
         settings, retriever=retriever, user_groups=user_groups
     )
     parts: list[str] = []
+    think_filter = ThinkBlockFilter()
+    # Buffer the head of the stream to detect abstentions before displaying.
+    # If the model declines to answer, we suppress the abstention and stream
+    # a general-knowledge fallback instead (when hybrid is on).
+    head_buf: list[str] = []
+    head_text = ""
+    abstention_detected = False
+    HEAD_CHECK_LEN = 200
     try:
         for chunk in chain.stream(standalone):
             parts.append(chunk)
-            yield {"token": chunk}
+            visible = think_filter.feed(chunk)
+            if not visible:
+                continue
+            if not abstention_detected and len(head_text) < HEAD_CHECK_LEN:
+                head_buf.append(visible)
+                head_text += visible
+                if len(head_text) >= HEAD_CHECK_LEN or "</think>" in "".join(parts):
+                    # Enough to judge — check for abstention.
+                    if settings.hybrid_fallback and is_abstention(head_text):
+                        abstention_detected = True
+                        # Don't yield the abstention; fall through to fallback below.
+                        head_buf = []
+                        head_text = ""
+                        break
+                    else:
+                        # Not an abstention — flush the buffer and continue streaming.
+                        for b in head_buf:
+                            yield {"token": b}
+                        head_buf = []
+            else:
+                yield {"token": visible}
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
         text = chain.invoke(standalone)
-        yield {"token": text}
+        visible = strip_think(text)
+        yield {"token": visible}
         parts = [text]
-    text = "".join(parts)
+    text = strip_think("".join(parts)) + think_filter.flush()
+    text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
+    # Server-side hybrid fallback: if abstention was detected mid-stream (or
+    # in the one-shot path), stream a general-knowledge answer instead.
+    if settings.hybrid_fallback and (abstention_detected or is_abstention(text)):
+        fb_text = general_knowledge_answer(standalone, llm)
+        for i in range(0, len(fb_text), 50):
+            yield {"token": fb_text[i : i + 50]}
+        text = fb_text
+    elif head_buf:
+        # Flush any buffered head that wasn't yielded (non-abstention case
+        # where stream ended before reaching HEAD_CHECK_LEN).
+        for b in head_buf:
+            yield {"token": b}
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     answer = Answer(
