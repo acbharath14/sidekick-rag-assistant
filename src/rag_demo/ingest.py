@@ -123,7 +123,7 @@ def main() -> None:
         "--repo",
         default=None,
         help="with --source github-docs, the repo as owner/name "
-        "(or set RAG_DEMO_GITHUB_REPO)",
+        "(default: acbharath14/sidekick-rag-assistant; or set RAG_DEMO_GITHUB_REPO)",
     )
     parser.add_argument(
         "--incremental",
