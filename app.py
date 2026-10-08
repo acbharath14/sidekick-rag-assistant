@@ -675,10 +675,7 @@ if question and index_ok:
     with st.chat_message("assistant", avatar="📚"):
         holder: dict = {}
         thinking = st.empty()
-        thinking.markdown(
-            '<span class="thinking-dots">🧠 Thinking</span>',
-            unsafe_allow_html=True,
-        )
+        thinking.markdown("🧠 *Thinking…*")
 
         def token_stream():
             first_token = True

@@ -32,8 +32,67 @@ your general knowledge — but start your response with exactly this line:
 FALLBACK_MARKERS = ("🌐", "general knowledge")
 
 
+def strip_think(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks (qwen3 et al.).
+
+    Handles unclosed blocks (model cut off mid-reasoning) by dropping
+    everything from <think> onward.
+    """
+    import re
+
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Unclosed think block — drop the trailing reasoning.
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+class ThinkBlockFilter:
+    """Stateful filter stripping <think>...</think> from a token stream.
+
+    Tags may be split across chunks; suppressed content is never yielded.
+    """
+
+    def __init__(self):
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, token: str) -> str:
+        """Feed one token; returns the visible text to yield (may be '')."""
+        self._buf += token
+        out = []
+        while True:
+            if not self._in_think:
+                start = self._buf.find("<think>")
+                if start == -1:
+                    # Keep a tail in case the tag is split across chunks.
+                    if len(self._buf) > 7:
+                        out.append(self._buf[:-7])
+                        self._buf = self._buf[-7:]
+                    break
+                if start > 0:
+                    out.append(self._buf[:start])
+                self._buf = self._buf[start + 7 :]
+                self._in_think = True
+            else:
+                end = self._buf.find("</think>")
+                if end == -1:
+                    if len(self._buf) > 8:
+                        self._buf = self._buf[-8:]
+                    break
+                self._buf = self._buf[end + 8 :]
+                self._in_think = False
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Return any buffered visible text (call at stream end)."""
+        if self._in_think:
+            return ""
+        buf, self._buf = self._buf, ""
+        return buf
+
+
 def is_fallback_answer(text: str) -> bool:
-    head = text.lstrip()[:120].lower()
+    head = strip_think(text).lstrip()[:120].lower()
     return head.startswith("🌐") or "general knowledge" in head
 
 
@@ -110,6 +169,7 @@ def ask(
         settings, retriever=retriever, user_groups=user_groups
     )
     text = chain.invoke(standalone)
+    text = strip_think(text)
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     sources = sorted({h.source for h in hits})
@@ -149,16 +209,21 @@ def stream_ask(
         settings, retriever=retriever, user_groups=user_groups
     )
     parts: list[str] = []
+    think_filter = ThinkBlockFilter()
     try:
         for chunk in chain.stream(standalone):
             parts.append(chunk)
-            yield {"token": chunk}
+            visible = think_filter.feed(chunk)
+            if visible:
+                yield {"token": visible}
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
         text = chain.invoke(standalone)
-        yield {"token": text}
+        visible = strip_think(text)
+        yield {"token": visible}
         parts = [text]
-    text = "".join(parts)
+    text = strip_think("".join(parts)) + think_filter.flush()
+    text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     answer = Answer(
