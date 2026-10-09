@@ -114,6 +114,39 @@ def is_abstention(text: str) -> bool:
     return any(p in head for p in ABSTENTION_PHRASES)
 
 
+SMALL_TALK_PATTERNS = (
+    "hi",
+    "hello",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "thanks",
+    "thank you",
+    "bye",
+    "goodbye",
+    "how are you",
+)
+
+
+def is_small_talk(question: str) -> bool:
+    """Detect greetings/remarks that don't need retrieval."""
+    q = question.strip().lower().rstrip("!.,?")
+    return q in SMALL_TALK_PATTERNS
+
+
+def small_talk_answer(question: str, llm) -> str:
+    """Brief friendly response without retrieval or citations."""
+    prompt = (
+        "The user said: \"" + question + "\"\n"
+        "Respond briefly and warmly (1-2 sentences). You are Sidekick, "
+        "a helpful RAG assistant. Do not mention sources or citations."
+    )
+    out = llm.invoke(prompt)
+    text = out.content if hasattr(out, "content") else str(out)
+    return strip_think(text).strip()
+
+
 def general_knowledge_answer(question: str, llm) -> str:
     """Direct general-knowledge answer, bypassing retrieval."""
     prompt = (
@@ -189,6 +222,18 @@ def ask(
     settings = settings or get_settings()
     history = history or []
     llm = get_llm(settings)
+    # Small talk bypasses retrieval entirely — no need to search the corpus
+    # for "hi".
+    if is_small_talk(question):
+        text = small_talk_answer(question, llm)
+        return Answer(
+            text=text,
+            sources=[],
+            hits=[],
+            latency_ms=0.0,
+            grounded=True,
+            standalone_question=None,
+        )
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
@@ -233,6 +278,21 @@ def stream_ask(
     settings = settings or get_settings()
     history = history or []
     llm = get_llm(settings)
+    # Small talk bypasses retrieval entirely.
+    if is_small_talk(question):
+        text = small_talk_answer(question, llm)
+        yield {"token": text}
+        yield {
+            "answer": Answer(
+                text=text,
+                sources=[],
+                hits=[],
+                latency_ms=0.0,
+                grounded=True,
+                standalone_question=None,
+            )
+        }
+        return
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
