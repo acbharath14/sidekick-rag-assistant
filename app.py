@@ -297,6 +297,8 @@ with st.sidebar:
         st.session_state.active_chat_id = _chat["id"]
         st.session_state.messages = []
         st.session_state.history = []
+        # Clear radio widget state so the new chat appears in the list.
+        st.session_state.pop("chat-selector", None)
         st.rerun()
 
     st.divider()
@@ -313,6 +315,7 @@ with st.sidebar:
             format_func=lambda cid: _labels.get(cid, cid),
             index=_idx,
             label_visibility="collapsed",
+            key="chat-selector",
         )
         if _picked != st.session_state.get("active_chat_id"):
             _persist_active_chat()
@@ -337,6 +340,9 @@ with st.sidebar:
             with _rc2:
                 if st.button("🗑️ Delete", use_container_width=True):
                     delete_chat(st.session_state.active_chat_id)
+                    # Clear the radio widget state so it rebuilds with the
+                    # updated chat list (prevents stale selection).
+                    st.session_state.pop("chat-selector", None)
                     _remaining = list_chats()
                     if _remaining:
                         st.session_state.active_chat_id = _remaining[0]["id"]
@@ -675,7 +681,10 @@ if question and index_ok:
     with st.chat_message("assistant", avatar="📚"):
         holder: dict = {}
         thinking = st.empty()
-        thinking.markdown("🧠 *Thinking…*")
+        thinking.markdown(
+            '<span class="thinking-dots">🧠 Thinking</span>',
+            unsafe_allow_html=True,
+        )
 
         def token_stream():
             first_token = True
