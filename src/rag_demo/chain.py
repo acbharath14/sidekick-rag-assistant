@@ -96,6 +96,69 @@ def is_fallback_answer(text: str) -> bool:
     return head.startswith("🌐") or "general knowledge" in head
 
 
+ABSTENTION_PHRASES = (
+    "no relevant answer",
+    "don't know",
+    "do not know",
+    "not in the context",
+    "not in context",
+    "cannot answer",
+    "can't answer",
+    "no information",
+)
+
+
+def is_abstention(text: str) -> bool:
+    """Detect when the model declined to answer from context."""
+    head = strip_think(text).lstrip()[:200].lower()
+    return any(p in head for p in ABSTENTION_PHRASES)
+
+
+SMALL_TALK_PATTERNS = (
+    "hi",
+    "hello",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "thanks",
+    "thank you",
+    "bye",
+    "goodbye",
+    "how are you",
+)
+
+
+def is_small_talk(question: str) -> bool:
+    """Detect greetings/remarks that don't need retrieval."""
+    q = question.strip().lower().rstrip("!.,?")
+    return q in SMALL_TALK_PATTERNS
+
+
+def small_talk_answer(question: str, llm) -> str:
+    """Brief friendly response without retrieval or citations."""
+    prompt = (
+        "The user said: \"" + question + "\"\n"
+        "Respond briefly and warmly (1-2 sentences). You are Sidekick, "
+        "a helpful RAG assistant. Do not mention sources or citations."
+    )
+    out = llm.invoke(prompt)
+    text = out.content if hasattr(out, "content") else str(out)
+    return strip_think(text).strip()
+
+
+def general_knowledge_answer(question: str, llm) -> str:
+    """Direct general-knowledge answer, bypassing retrieval."""
+    prompt = (
+        "Answer the following question from your general knowledge. "
+        "Be concise and accurate.\n\nQuestion: " + question
+    )
+    out = llm.invoke(prompt)
+    text = out.content if hasattr(out, "content") else str(out)
+    text = strip_think(text)
+    return "🌐 General knowledge (not from your corpus).\n" + text.strip()
+
+
 @dataclass
 class Answer:
     text: str
@@ -159,6 +222,18 @@ def ask(
     settings = settings or get_settings()
     history = history or []
     llm = get_llm(settings)
+    # Small talk bypasses retrieval entirely — no need to search the corpus
+    # for "hi".
+    if is_small_talk(question):
+        text = small_talk_answer(question, llm)
+        return Answer(
+            text=text,
+            sources=[],
+            hits=[],
+            latency_ms=0.0,
+            grounded=True,
+            standalone_question=None,
+        )
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
@@ -170,6 +245,10 @@ def ask(
     )
     text = chain.invoke(standalone)
     text = strip_think(text)
+    # Server-side hybrid fallback: if the model abstained but hybrid is on,
+    # answer from general knowledge instead of showing "No relevant answer".
+    if settings.hybrid_fallback and is_abstention(text):
+        text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     sources = sorted({h.source for h in hits})
@@ -199,6 +278,21 @@ def stream_ask(
     settings = settings or get_settings()
     history = history or []
     llm = get_llm(settings)
+    # Small talk bypasses retrieval entirely.
+    if is_small_talk(question):
+        text = small_talk_answer(question, llm)
+        yield {"token": text}
+        yield {
+            "answer": Answer(
+                text=text,
+                sources=[],
+                hits=[],
+                latency_ms=0.0,
+                grounded=True,
+                standalone_question=None,
+            )
+        }
+        return
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
@@ -210,11 +304,36 @@ def stream_ask(
     )
     parts: list[str] = []
     think_filter = ThinkBlockFilter()
+    # Buffer the head of the stream to detect abstentions before displaying.
+    # If the model declines to answer, we suppress the abstention and stream
+    # a general-knowledge fallback instead (when hybrid is on).
+    head_buf: list[str] = []
+    head_text = ""
+    abstention_detected = False
+    HEAD_CHECK_LEN = 200
     try:
         for chunk in chain.stream(standalone):
             parts.append(chunk)
             visible = think_filter.feed(chunk)
-            if visible:
+            if not visible:
+                continue
+            if not abstention_detected and len(head_text) < HEAD_CHECK_LEN:
+                head_buf.append(visible)
+                head_text += visible
+                if len(head_text) >= HEAD_CHECK_LEN or "</think>" in "".join(parts):
+                    # Enough to judge — check for abstention.
+                    if settings.hybrid_fallback and is_abstention(head_text):
+                        abstention_detected = True
+                        # Don't yield the abstention; fall through to fallback below.
+                        head_buf = []
+                        head_text = ""
+                        break
+                    else:
+                        # Not an abstention — flush the buffer and continue streaming.
+                        for b in head_buf:
+                            yield {"token": b}
+                        head_buf = []
+            else:
                 yield {"token": visible}
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
@@ -224,6 +343,18 @@ def stream_ask(
         parts = [text]
     text = strip_think("".join(parts)) + think_filter.flush()
     text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
+    # Server-side hybrid fallback: if abstention was detected mid-stream (or
+    # in the one-shot path), stream a general-knowledge answer instead.
+    if settings.hybrid_fallback and (abstention_detected or is_abstention(text)):
+        fb_text = general_knowledge_answer(standalone, llm)
+        for i in range(0, len(fb_text), 50):
+            yield {"token": fb_text[i : i + 50]}
+        text = fb_text
+    elif head_buf:
+        # Flush any buffered head that wasn't yielded (non-abstention case
+        # where stream ended before reaching HEAD_CHECK_LEN).
+        for b in head_buf:
+            yield {"token": b}
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     answer = Answer(
