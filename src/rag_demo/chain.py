@@ -36,13 +36,20 @@ def strip_think(text: str) -> str:
     """Remove <think>...</think> reasoning blocks (qwen3 et al.).
 
     Handles unclosed blocks (model cut off mid-reasoning) by dropping
-    everything from <think> onward.
+    everything from <think> onward. Also handles orphaned </think>
+    (closing tag without opening tag) by dropping everything before it.
     """
     import re
 
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     # Unclosed think block — drop the trailing reasoning.
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+    # Orphaned closing tag (no opening tag before it) — drop everything
+    # up to and including it. Handles malformed model output.
+    if "</think>" in text and "<think>" not in text.split("</think>")[0]:
+        text = text.split("</think>", 1)[-1]
+    # Clean any remaining stray tags.
+    text = text.replace("</think>", "").replace("<think>", "")
     return text.strip()
 
 
