@@ -70,6 +70,13 @@ class ThinkBlockFilter:
         while True:
             if not self._in_think:
                 start = self._buf.find("<think>")
+                # Handle orphaned </think> (no opening tag): drop everything
+                # up to and including it. This handles malformed model output
+                # where reasoning leaks without the opening tag.
+                orphan_end = self._buf.find("</think>")
+                if start == -1 and orphan_end != -1:
+                    self._buf = self._buf[orphan_end + 8 :]
+                    continue
                 if start == -1:
                     # Keep a tail in case the tag is split across chunks.
                     if len(self._buf) > 7:
