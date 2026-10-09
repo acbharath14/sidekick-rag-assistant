@@ -33,21 +33,42 @@ Section summaries:
 Summary:"""
 
 
-def _invoke(llm, prompt: str) -> str:
-    out = llm.invoke(prompt)
-    text = out.content if hasattr(out, "content") else str(out)
-    return text.strip()
+def _invoke(llm, prompt: str, timeout: float = 120.0) -> str:
+    """Invoke the LLM with a timeout; returns '' on timeout/failure."""
+    import concurrent.futures
+
+    from .chain import strip_think
+
+    def _do():
+        out = llm.invoke(prompt)
+        text = out.content if hasattr(out, "content") else str(out)
+        return strip_think(text.strip())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_do)
+        try:
+            return future.result(timeout=timeout)
+        except (concurrent.futures.TimeoutError, Exception):
+            future.cancel()
+            return ""
 
 
 def summarize(text: str, settings: Settings | None = None) -> str:
     settings = settings or get_settings()
     llm = get_llm(settings)
     if len(text) <= SINGLE_CALL_CHARS:
-        return _invoke(llm, SUMMARY_PROMPT.format(text=text))
+        result = _invoke(llm, SUMMARY_PROMPT.format(text=text))
+        return result or "Summary timed out — the document may be too long for this model."
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_CHARS,
         chunk_overlap=200,
     )
     chunks = splitter.split_text(text)
-    partials = [_invoke(llm, MAP_PROMPT.format(chunk=c)) for c in chunks]
-    return _invoke(llm, REDUCE_PROMPT.format(summaries="\n\n".join(partials)))
+    partials = []
+    for c in chunks:
+        p = _invoke(llm, MAP_PROMPT.format(chunk=c))
+        if p:  # skip timed-out chunks rather than failing the whole summary
+            partials.append(p)
+    if not partials:
+        return "Summary timed out — the document may be too long for this model."
+    return _invoke(llm, REDUCE_PROMPT.format(summaries="\n\n".join(partials))) or "Summary timed out."
