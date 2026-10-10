@@ -253,11 +253,15 @@ def agentic_ask(
     max_iterations: int = MAX_ITERATIONS,
     verbose: bool = False,
     show_plan: bool = False,
+    on_progress: object = None,
 ) -> Answer:
     """Run the ReAct loop (Thought → Action → Observation).
 
     If show_plan is True, displays the plan as a flowchart and asks for
     confirmation before executing.
+
+    on_progress: optional callable(phase, message) for live UI updates.
+        phase is one of "thought", "action", "observation", "synthesize".
 
     Returns an Answer with sources from all tool calls.
     """
@@ -267,18 +271,27 @@ def agentic_ask(
     llm = get_llm(settings)
     started = time.perf_counter()
 
+    def _progress(phase: str, message: str):
+        if on_progress:
+            try:
+                on_progress(phase, message)
+            except Exception:
+                pass
+        if verbose:
+            print(f"[{phase}] {message}")
+
     def _invoke(prompt: str) -> str:
         out = llm.invoke(prompt)
         text = out.content if hasattr(out, "content") else str(out)
         return strip_think(text.strip())
 
     # ---- THOUGHT: plan tool calls ----
+    _progress("thought", "Planning search strategy...")
     thought_text = _invoke(THOUGHT_PROMPT.format(question=question))
     plan = _parse_thought(thought_text)
     if not plan:
         plan = [{"tool": "search_docs", "query": question}]
-    if verbose:
-        print(f"[thought] plan: {plan}")
+    _progress("thought", f"Plan: {len(plan)} tool calls")
 
     # ---- Show plan and get approval (if requested) ----
     if show_plan:
@@ -334,26 +347,29 @@ def agentic_ask(
 
     while iteration < max_iterations:
         iteration += 1
-        if verbose:
-            print(f"[action] iteration {iteration}, plan: {plan}")
+        _progress("action", f"Iteration {iteration}: executing {len(plan)} searches...")
 
         # ACTION: execute tool calls.
         for step in plan:
             tool, q = step["tool"], step["query"]
+            _progress("action", f"Searching [{tool}]: {q[:60]}")
             result = _dispatch(tool, q)
             all_evidence.append(f"--- {tool}: {q} ---\n{result}")
             for m in re.finditer(r"\[([^\]]+)\]", result):
                 all_sources.add(m.group(1))
 
         # OBSERVATION: evaluate sufficiency.
+        _progress("observation", "Evaluating if evidence is sufficient...")
         evidence_text = "\n\n".join(all_evidence)
         obs_text = _invoke(OBSERVATION_PROMPT.format(
             question=question, evidence=evidence_text
         ))
         verdict = _parse_verify(obs_text)
-        if verbose:
-            print(f"[observation] sufficient={verdict['sufficient']}, "
-                  f"gaps={verdict['gaps']}")
+        _progress(
+            "observation",
+            f"Sufficient: {verdict['sufficient']}"
+            + (f", gaps: {verdict['gaps']}" if verdict.get("gaps") else "")
+        )
 
         if verdict["sufficient"]:
             break
@@ -377,10 +393,12 @@ def agentic_ask(
         plan = new_plan
 
     # ---- SYNTHESIZE ----
+    _progress("synthesize", "Synthesizing final answer from all evidence...")
     evidence_text = "\n\n".join(all_evidence)
     answer_text = _invoke(SYNTHESIZE_PROMPT.format(
         question=question, evidence=evidence_text
     ))
+    _progress("synthesize", "Done.")
 
     latency_ms = (time.perf_counter() - started) * 1000
     return Answer(

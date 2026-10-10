@@ -876,7 +876,7 @@ reg_case = st.session_state.pop("pending_case", None)
 # Execute/Cancel triggers a rerun where `question` is None.
 agentic_pending = st.session_state.get("agentic_pending")
 if agentic_pending and index_ok:
-    from rag_demo.agent import agentic_ask, format_plan_as_ascii, format_plan_as_mermaid
+    from rag_demo.agent import agentic_ask, format_plan_as_ascii
 
     pending_q = agentic_pending["question"]
     pending_plan = agentic_pending["plan"]
@@ -887,18 +887,26 @@ if agentic_pending and index_ok:
             st.session_state.pop("agentic_pending", None)
             st.session_state.pop("agentic_approved", None)
             with st.status("🤖 Running agent...", expanded=True) as status:
-                st.write("**Thought:** Plan approved, executing...")
+                # Live progress updates via callback.
+                _phase_icons = {
+                    "thought": "🧠", "action": "🔍",
+                    "observation": "🔎", "synthesize": "📝",
+                }
+                def _on_progress(phase: str, message: str):
+                    icon = _phase_icons.get(phase, "•")
+                    st.write(f"{icon} **{phase.title()}:** {message}")
+
+                st.write("_This takes 1-2 minutes on CPU (multiple LLM calls)._")
                 try:
                     answer = agentic_ask(
                         pending_q, settings,
                         verbose=False, show_plan=False,
+                        on_progress=_on_progress,
                     )
                 except Exception as e:
                     status.update(label="❌ Failed", state="error")
                     st.error(f"Agent failed: {e}")
                     st.stop()
-                st.write(f"**Action:** Gathered evidence from {len(answer.sources)} sources")
-                st.write("**Observation:** Synthesizing answer...")
                 status.update(label="✅ Done", state="complete")
 
             st.markdown(answer.text)
@@ -915,19 +923,9 @@ if agentic_pending and index_ok:
 
         # Not yet approved: show the plan with Execute/Cancel.
         st.markdown("**🤖 Agent Plan:**")
-        # ASCII flowchart (always works, no JS dependency).
+        # ASCII flowchart (always works, no external dependency).
         st.code(format_plan_as_ascii(pending_plan, pending_q))
-        # Mermaid (enhanced visual, may not render offline).
-        with st.expander("Flowchart (Mermaid)"):
-            mermaid = format_plan_as_mermaid(pending_plan, pending_q)
-            st.components.v1.html(
-                f"""
-                <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-                <div class="mermaid">{mermaid}</div>
-                <script>mermaid.initialize({{startOnLoad:true}});</script>
-                """,
-                height=300,
-            )
+        st.caption("Each step shows the tool (📚 local docs / 🌐 web search) and the query.")
 
         col1, col2 = st.columns(2)
         with col1:
