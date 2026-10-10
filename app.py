@@ -488,6 +488,16 @@ with st.sidebar:
                         st.error(f"❌ Connection failed: {e}")
                     except Exception as e:
                         st.error(f"❌ Error: {e}")
+        # Search cache management.
+        if st.button("🗑️ Clear search cache", key="clear_search_cache",
+                     help="Clear cached web search results (they expire after 30 min anyway)"):
+            try:
+                from rag_demo.agent import _search_cache
+                n = len(_search_cache)
+                _search_cache.clear()
+                st.success(f"✅ Cleared {n} cached result(s)")
+            except Exception:
+                st.info("Cache is empty")
 
     # Enterprise connectors: PAT/token configuration + index building.
     # Tokens are kept in session state (in-memory only, cleared on restart).
@@ -964,6 +974,7 @@ if agentic_pending and index_ok:
                         pending_q, settings,
                         verbose=False, show_plan=False,
                         on_progress=_on_progress,
+                        history=st.session_state.get("history", []),
                     )
                 except Exception as e:
                     status.update(label="❌ Failed", state="error")
@@ -1056,6 +1067,7 @@ if question and index_ok:
                 answer = agentic_ask(
                     question, settings,
                     verbose=False, show_plan=False,
+                    history=st.session_state.get("history", []),
                 )
                 st.write(f"**Action:** Executed {len(answer.sources)} tool calls")
                 st.write("**Observation:** Synthesizing answer...")
