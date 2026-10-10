@@ -462,9 +462,18 @@ with st.sidebar:
             from rag_demo.summarize import summarize
 
             with st.spinner("Summarizing…"):
-                st.session_state.upload_summary = summarize(
-                    st.session_state.upload_text, settings
-                )
+                try:
+                    result = summarize(
+                        st.session_state.upload_text, settings
+                    )
+                    if not result or not result.strip():
+                        st.error("Summarize returned empty — check the terminal for errors.")
+                    else:
+                        st.session_state.upload_summary = result
+                except Exception as e:
+                    st.error(f"Summarize failed: {type(e).__name__}: {e}")
+                    # Also print to terminal for debugging
+                    print(f"[summarize] FAILED: {type(e).__name__}: {e}")
         if st.button("💬 Ask about this file", use_container_width=True):
             from langchain_community.vectorstores import FAISS
             from langchain_text_splitters import RecursiveCharacterTextSplitter
