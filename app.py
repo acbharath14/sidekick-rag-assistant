@@ -1041,8 +1041,13 @@ if question and index_ok:
             # THOUGHT: generate plan.
             from datetime import date
             llm = get_llm(settings)
+            hist = st.session_state.get("history", [])
+            hist_text = "\n".join(
+                f"Q: {q}\nA: {a[:300]}" for q, a in hist[-3:]
+            ) if hist else "No prior conversation."
             out = llm.invoke(THOUGHT_PROMPT.format(
-                question=question, current_date=date.today().isoformat()
+                question=question, current_date=date.today().isoformat(),
+                history=hist_text
             ))
             thought_text = out.content if hasattr(out, "content") else str(out)
             plan = _parse_thought(strip_think(thought_text.strip()))
