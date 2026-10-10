@@ -44,77 +44,16 @@ def search_docs(query: str, k: int = 4) -> str:
 
 @mcp.tool()
 def search_web(query: str, k: int = 5) -> str:
-    """Search the web via DuckDuckGo (no API key needed).
+    """Search the web. Uses Tavily API if RAG_DEMO_TAVILY_API_KEY is set,
+    otherwise falls back to DuckDuckGo (unreliable).
 
     Args:
         query: search query.
         k: max results to return (default 5).
     """
-    import requests
-    from html.parser import HTMLParser
-
-    # DuckDuckGo HTML endpoint (no key required).
-    url = "https://html.duckduckgo.com/html/"
-    try:
-        resp = requests.post(
-            url,
-            data={"q": query},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        return f"Web search failed: {e}"
-
-    class _Parser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.results: list[dict] = []
-            self._in_a = False
-            self._href = ""
-            self._text = ""
-            self._in_snippet = False
-
-        def handle_starttag(self, tag, attrs):
-            attrs = dict(attrs)
-            if tag == "a" and "result__a" in attrs.get("class", ""):
-                self._in_a = True
-                self._href = attrs.get("href", "")
-            elif tag == "a" and "result__snippet" in attrs.get("class", ""):
-                self._in_snippet = True
-
-        def handle_data(self, data):
-            if self._in_a:
-                self._text += data
-            elif self._in_snippet:
-                # Snippet text follows the title link.
-                if self.results:
-                    self.results[-1]["snippet"] = self.results[-1].get("snippet", "") + data
-
-        def handle_endtag(self, tag):
-            if tag == "a" and self._in_a:
-                self._in_a = False
-                # DuckDuckGo wraps URLs in a redirect; extract the real one.
-                href = self._href
-                if "uddg=" in href:
-                    from urllib.parse import parse_qs, urlparse
-                    qs = parse_qs(urlparse(href).query)
-                    href = qs.get("uddg", [href])[0]
-                self.results.append({"title": self._text.strip(), "url": href})
-                self._text = ""
-                self._href = ""
-            elif tag == "a" and self._in_snippet:
-                self._in_snippet = False
-
-    parser = _Parser()
-    parser.feed(resp.text)
-    results = parser.results[:k]
-    if not results:
-        return "No web results found."
-    return "\n\n".join(
-        f"[{r['title']}]({r['url']})\n{r.get('snippet', '')}".strip()
-        for r in results
-    )
+    # Reuse the agent's web search implementation.
+    from .agent import _search_web_tool
+    return _search_web_tool(query, k=k)
 
 
 def main() -> None:
