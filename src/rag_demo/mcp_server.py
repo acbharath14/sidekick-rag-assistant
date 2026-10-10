@@ -56,6 +56,19 @@ def search_web(query: str, k: int = 5) -> str:
     return _search_web_tool(query, k=k)
 
 
+@mcp.tool()
+def extract_pages(urls: str, query: str = "") -> str:
+    """Fetch full page content from URLs via Tavily Extract.
+
+    Args:
+        urls: comma-separated URLs to extract.
+        query: optional query for reranking extracted chunks.
+    """
+    from .agent import _extract_pages_tool
+    url_list = [u.strip() for u in urls.split(",") if u.strip()]
+    return _extract_pages_tool(url_list, query)
+
+
 def main() -> None:
     mcp.run()
 
