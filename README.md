@@ -201,12 +201,19 @@ evaluates evidence, and refines its approach — up to 4 iterations before synth
 
 **Tools:**
 - `search_docs` — local FAISS corpus (technical documentation)
-- `search_web` — web search via Tavily API (recommended) or DuckDuckGo fallback
+- `search_web` — web search via Tavily API (recommended) or DuckDuckGo fallback. Returns snippets.
+- `extract_pages` — full page content via Tavily Extract. Use after `search_web` when snippets lack prices, dates, or details.
 
 **Features:**
 - **Smart routing** — the planner picks `search_docs` for API/code questions and
   `search_web` for everything else (prices, news, general knowledge). A fast-path
   heuristic skips the LLM planning call for obvious web queries, saving 20-30s on CPU.
+- **Deep extraction** — for deals/shopping questions, the agent searches first, then
+  extracts full page content from the top 2-3 URLs to get actual prices. Max 3
+  extractions per run (configurable via `RAG_DEMO_MAX_EXTRACTS`). Also exposed as
+  an MCP tool.
+- **Structured deals output** — shopping questions get a table with product, retailer,
+  prices, discount, status (announced/predicted/leaked/historical), and source.
 - **Tavily backend** — set `RAG_DEMO_TAVILY_API_KEY` (free tier: 1,000 searches/month
   at tavily.com) for reliable web search. Falls back to DuckDuckGo HTML scraping
   without a key (often blocked/rate-limited). Enter the key in the Streamlit sidebar
