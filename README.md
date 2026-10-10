@@ -177,6 +177,10 @@ OCR automatically — first install the binaries:
 conda install -c conda-forge tesseract poppler
 ```
 
+> **Try it:** a sample scanned PDF is included at `samples/ocr_test_scanned.pdf`.
+> Upload it via the sidebar to see OCR extraction, summarization, and
+> file-chat in action.
+
 In the Streamlit sidebar: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
 10 MB cap). The app extracts the text in memory, offers a **📝 Summarize**
 button (map-reduce for long docs), and **💬 Ask about this file** builds an
