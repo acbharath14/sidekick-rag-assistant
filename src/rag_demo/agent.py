@@ -489,8 +489,25 @@ def agentic_ask(
         _search_cache.clear()
 
     settings = settings or get_settings()
-    llm = get_llm(settings)
+    llm = get_llm(settings)  # Main model — used for final synthesis.
     started = time.perf_counter()
+
+    # Fast model for planning/observation/rewrite steps. Set RAG_DEMO_AGENT_MODEL
+    # (e.g. qwen3:8b) to speed up the ReAct loop on CPU while keeping the main
+    # model for answer quality.
+    from langchain_ollama import OllamaLLM
+    try:
+        fast_llm = OllamaLLM(
+            model=settings.agent_model,
+            base_url=settings.ollama_base_url,
+            timeout=300.0,
+            keep_alive="30m",
+        )
+        # If agent_model == main model, reuse the same client.
+        if settings.agent_model == settings.ollama_model:
+            fast_llm = llm
+    except Exception:
+        fast_llm = llm
 
     def _progress(phase: str, message: str):
         if on_progress:
@@ -501,8 +518,9 @@ def agentic_ask(
         if verbose:
             print(f"[{phase}] {message}")
 
-    def _invoke(prompt: str) -> str:
-        out = llm.invoke(prompt)
+    def _invoke(prompt: str, fast: bool = False) -> str:
+        model = fast_llm if fast else llm
+        out = model.invoke(prompt)
         text = out.content if hasattr(out, "content") else str(out)
         return strip_think(text.strip())
 
@@ -519,7 +537,7 @@ def agentic_ask(
         _progress("thought", "Rewriting follow-up with conversation context...")
         try:
             from .rewrite import rewrite_query
-            rewritten = rewrite_query(question, history, llm)
+            rewritten = rewrite_query(question, history, fast_llm)
             if rewritten and rewritten.strip() and rewritten != question:
                 effective_question = rewritten.strip()
                 _progress("thought", f"Rewritten: {effective_question[:60]}")
@@ -551,7 +569,7 @@ def agentic_ask(
         thought_text = _invoke(THOUGHT_PROMPT.format(
             question=effective_question, current_date=current_date,
             history=history_text or "No prior conversation."
-        ))
+        ), fast=True)
         plan = _parse_thought(thought_text)
         if not plan:
             plan = [{"tool": "search_docs", "query": question}]
@@ -646,7 +664,7 @@ def agentic_ask(
             question=effective_question, evidence=evidence_text,
             current_date=current_date,
             history=history_text or "No prior conversation."
-        ))
+        ), fast=True)
         verdict = _parse_verify(obs_text)
         _progress(
             "observation",
