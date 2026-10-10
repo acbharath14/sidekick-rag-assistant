@@ -304,8 +304,9 @@ with st.sidebar:
         st.session_state.active_chat_id = _chat["id"]
         st.session_state.messages = []
         st.session_state.history = []
-        # Clear radio widget state so the new chat appears in the list.
-        st.session_state.pop("chat-selector", None)
+        # Explicitly set the radio widget to the new chat (not just clear it)
+        # to prevent stale selection from reloading old messages on next rerun.
+        st.session_state["chat-selector"] = _chat["id"]
         st.rerun()
 
     st.divider()
@@ -347,9 +348,6 @@ with st.sidebar:
             with _rc2:
                 if st.button("🗑️ Delete", use_container_width=True):
                     delete_chat(st.session_state.active_chat_id)
-                    # Clear the radio widget state so it rebuilds with the
-                    # updated chat list (prevents stale selection).
-                    st.session_state.pop("chat-selector", None)
                     _remaining = list_chats()
                     if _remaining:
                         st.session_state.active_chat_id = _remaining[0]["id"]
@@ -361,6 +359,8 @@ with st.sidebar:
                         st.session_state.active_chat_id = _chat["id"]
                         st.session_state.messages = []
                         st.session_state.history = []
+                    # Explicitly sync the radio widget to prevent stale selection.
+                    st.session_state["chat-selector"] = st.session_state.active_chat_id
                     st.rerun()
     _search = st.text_input("🔍 Search chat", key="chat-search")
     if st.session_state.get("messages"):
