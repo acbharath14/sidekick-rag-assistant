@@ -276,6 +276,7 @@ with st.sidebar:
         format_func=lambda c: CORPUS_LABELS.get(c, c),
         index=corpus_options.index(default_corpus),
         help="Build an index first: python -m rag_demo.ingest --source <name>",
+        key="corpus-selector",
     )
     upload_retriever = (
         st.session_state.get("upload_retriever") if corpus == "upload" else None
@@ -283,12 +284,26 @@ with st.sidebar:
     if corpus != "meridian" and corpus != "upload":
         settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
 
-    # Visible indicator when chatting with an uploaded file
+    # Prominent context indicator — always visible so the user knows
+    # exactly what the assistant is answering from.
+    _corpus_descriptions = {
+        "meridian": "📚 **Meridian docs** — logistics API, deployment, security",
+        "playwright-docs": "🎭 **Playwright docs** — browser automation",
+        "confluence-mock": "📝 **Confluence mock** — simulated wiki pages",
+        "github-docs": "🐙 **GitHub docs** — repository markdown files",
+    }
     if corpus == "upload":
-        st.info(
-            f"📄 Chatting with **{st.session_state.get('upload_name', 'uploaded file')}** — "
-            "answers come from this file. Switch the Corpus selector above to go back.",
+        _ctx_label = (
+            f"📄 **Uploaded file: {st.session_state.get('upload_name', 'file')}** — "
+            "answers come from this file only"
         )
+    else:
+        _ctx_label = _corpus_descriptions.get(corpus, f"📚 **{corpus}**")
+    st.info(
+        f"{_ctx_label} · "
+        "Change the **Corpus** selector in the sidebar to switch context.",
+        icon="🧭",
+    )
 
     st.divider()
     st.subheader("Session")
@@ -509,6 +524,8 @@ with st.sidebar:
                     settings, store=store, chunks=chunk_dicts
                 )
                 st.session_state.corpus_override = "upload"
+                # Explicitly sync the corpus radio widget.
+                st.session_state["corpus-selector"] = "upload"
             st.success(
                 f"Now chatting with **{st.session_state.upload_name}** "
                 f"({len(chunks)} chunks). Ask anything about it below. "
