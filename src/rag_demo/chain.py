@@ -248,6 +248,21 @@ def ask(
             grounded=True,
             standalone_question=None,
         )
+    # Episodic memory: retrieve relevant past conversations and prepend
+    # to history. This enables long-term recall across sessions.
+    episodic_used = False
+    try:
+        from .episodic import EpisodicMemory
+
+        _episodic = EpisodicMemory(settings)
+        _episodes = _episodic.search(question, k=3)
+        if _episodes:
+            # Prepend as (question, answer) tuples, oldest first.
+            _ep_history = [(e["question"], e["answer"]) for e in reversed(_episodes)]
+            history = _ep_history + history
+            episodic_used = True
+    except Exception:
+        pass
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
@@ -275,6 +290,15 @@ def ask(
         standalone_question=standalone if standalone != question else None,
     )
     log_question(settings, question, answer, latency_ms)
+    # Save to episodic memory for long-term recall (skip if it was a fallback
+    # to avoid polluting memory with "I don't know" responses).
+    if answer.grounded:
+        try:
+            from .episodic import EpisodicMemory
+
+            EpisodicMemory(settings).add(question, text)
+        except Exception:
+            pass
     return answer
 
 
@@ -307,6 +331,17 @@ def stream_ask(
             )
         }
         return
+    # Episodic memory: retrieve relevant past conversations.
+    try:
+        from .episodic import EpisodicMemory
+
+        _episodic = EpisodicMemory(settings)
+        _episodes = _episodic.search(question, k=3)
+        if _episodes:
+            _ep_history = [(e["question"], e["answer"]) for e in reversed(_episodes)]
+            history = _ep_history + history
+    except Exception:
+        pass
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
@@ -385,4 +420,12 @@ def stream_ask(
         standalone_question=standalone if standalone != question else None,
     )
     log_question(settings, question, answer, latency_ms)
+    # Save to episodic memory (skip ungrounded fallbacks).
+    if answer.grounded:
+        try:
+            from .episodic import EpisodicMemory
+
+            EpisodicMemory(settings).add(question, text)
+        except Exception:
+            pass
     yield {"answer": answer}
