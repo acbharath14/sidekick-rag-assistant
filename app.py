@@ -284,12 +284,26 @@ with st.sidebar:
     if corpus != "meridian" and corpus != "upload":
         settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
 
-    # Visible indicator when chatting with an uploaded file
+    # Prominent context indicator — always visible so the user knows
+    # exactly what the assistant is answering from.
+    _corpus_descriptions = {
+        "meridian": "📚 **Meridian docs** — logistics API, deployment, security",
+        "playwright-docs": "🎭 **Playwright docs** — browser automation",
+        "confluence-mock": "📝 **Confluence mock** — simulated wiki pages",
+        "github-docs": "🐙 **GitHub docs** — repository markdown files",
+    }
     if corpus == "upload":
-        st.info(
-            f"📄 Chatting with **{st.session_state.get('upload_name', 'uploaded file')}** — "
-            "answers come from this file. Switch the Corpus selector above to go back.",
+        _ctx_label = (
+            f"📄 **Uploaded file: {st.session_state.get('upload_name', 'file')}** — "
+            "answers come from this file only"
         )
+    else:
+        _ctx_label = _corpus_descriptions.get(corpus, f"📚 **{corpus}**")
+    st.info(
+        f"{_ctx_label} · "
+        "Change the **Corpus** selector in the sidebar to switch context.",
+        icon="🧭",
+    )
 
     st.divider()
     st.subheader("Session")
