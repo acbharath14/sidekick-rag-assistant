@@ -440,28 +440,54 @@ with st.sidebar:
             st.session_state["tavily_key"] = tavily_key
         # Web search diagnostic.
         if st.button("🌐 Test web search", key="test_web_search",
-                     help="Check if DuckDuckGo is reachable from this machine"):
+                     help="Check which search backend is active and if it works"):
             with st.spinner("Testing..."):
-                import requests
-                try:
-                    resp = requests.post(
-                        "https://html.duckduckgo.com/html/",
-                        data={"q": "test"},
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200 and "result__a" in resp.text:
-                        st.success("✅ Web search working")
-                    elif resp.status_code == 200:
-                        st.warning("⚠️ Reached DuckDuckGo but no results parsed (HTML changed?)")
-                    else:
-                        st.error(f"❌ HTTP {resp.status_code}")
-                except requests.Timeout:
-                    st.error("❌ Timeout — network slow or DuckDuckGo blocked")
-                except requests.ConnectionError as e:
-                    st.error(f"❌ Connection failed: {e}")
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
+                import os, requests
+                tavily_key = os.environ.get("RAG_DEMO_TAVILY_API_KEY")
+                if tavily_key:
+                    # Test Tavily backend.
+                    try:
+                        resp = requests.post(
+                            "https://api.tavily.com/search",
+                            headers={"Content-Type": "application/json"},
+                            json={"api_key": tavily_key, "query": "test",
+                                  "max_results": 1},
+                            timeout=15,
+                        )
+                        if resp.status_code == 200:
+                            n = len(resp.json().get("results", []))
+                            st.success(f"✅ Tavily working ({n} result(s) for test query)")
+                        elif resp.status_code == 401:
+                            st.error("❌ Tavily: invalid API key (401)")
+                        else:
+                            st.error(f"❌ Tavily HTTP {resp.status_code}: "
+                                     f"{resp.text[:200]}")
+                    except requests.Timeout:
+                        st.error("❌ Tavily timeout — network issue")
+                    except Exception as e:
+                        st.error(f"❌ Tavily error: {e}")
+                else:
+                    st.info("ℹ️ No Tavily key set — using DuckDuckGo fallback")
+                    try:
+                        resp = requests.post(
+                            "https://html.duckduckgo.com/html/",
+                            data={"q": "test"},
+                            headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=10,
+                        )
+                        if resp.status_code == 200 and "result__a" in resp.text:
+                            st.success("✅ Web search working")
+                        elif resp.status_code == 200:
+                            st.warning("⚠️ Reached DuckDuckGo but no results parsed "
+                                       "(HTML changed?)")
+                        else:
+                            st.error(f"❌ HTTP {resp.status_code}")
+                    except requests.Timeout:
+                        st.error("❌ Timeout — network slow or DuckDuckGo blocked")
+                    except requests.ConnectionError as e:
+                        st.error(f"❌ Connection failed: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
 
     # Enterprise connectors: PAT/token configuration + index building.
     # Tokens are kept in session state (in-memory only, cleared on restart).
