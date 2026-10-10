@@ -45,6 +45,13 @@ class Settings:
     ollama_base_url: str = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_BASE_URL", "http://localhost:11434")
     )
+    # Fast model for agentic planning/observation steps. Defaults to the main
+    # model; set RAG_DEMO_AGENT_MODEL=qwen3:8b to speed up the ReAct loop
+    # while keeping the main model for final synthesis.
+    agent_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "RAG_DEMO_AGENT_MODEL", os.environ.get("RAG_DEMO_MODEL", "qwen3:8b"))
+    )
 
     # Retrieval: "dense" (default, pure vector search) or "hybrid"
     # (BM25 + dense with reciprocal rank fusion).
