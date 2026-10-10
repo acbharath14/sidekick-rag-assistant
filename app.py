@@ -276,6 +276,7 @@ with st.sidebar:
         format_func=lambda c: CORPUS_LABELS.get(c, c),
         index=corpus_options.index(default_corpus),
         help="Build an index first: python -m rag_demo.ingest --source <name>",
+        key="corpus-selector",
     )
     upload_retriever = (
         st.session_state.get("upload_retriever") if corpus == "upload" else None
@@ -509,6 +510,8 @@ with st.sidebar:
                     settings, store=store, chunks=chunk_dicts
                 )
                 st.session_state.corpus_override = "upload"
+                # Explicitly sync the corpus radio widget.
+                st.session_state["corpus-selector"] = "upload"
             st.success(
                 f"Now chatting with **{st.session_state.upload_name}** "
                 f"({len(chunks)} chunks). Ask anything about it below. "
