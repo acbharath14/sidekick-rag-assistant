@@ -45,7 +45,58 @@ def _search_docs_tool(query: str, k: int = 4, settings: Settings | None = None) 
 
 
 def _search_web_tool(query: str, k: int = 5) -> str:
-    """Tool: search the web via DuckDuckGo. Returns titles, URLs, snippets."""
+    """Tool: search the web. Uses Tavily API if RAG_DEMO_TAVILY_API_KEY is set,
+    otherwise falls back to DuckDuckGo HTML scraping (unreliable, often blocked).
+
+    Returns titles, URLs, snippets.
+    """
+    import os
+    import requests
+
+    tavily_key = os.environ.get("RAG_DEMO_TAVILY_API_KEY")
+    if tavily_key:
+        return _tavily_search(query, k, tavily_key)
+    return _duckduckgo_search(query, k)
+
+
+def _tavily_search(query: str, k: int, api_key: str) -> str:
+    """Search via Tavily API (reliable, AI-optimized)."""
+    import requests
+
+    try:
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            headers={"Content-Type": "application/json"},
+            json={
+                "api_key": api_key,
+                "query": query,
+                "max_results": k,
+                "search_depth": "basic",
+                "include_answer": False,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.Timeout:
+        return "[TOOL_ERROR] Tavily search timed out after 20s"
+    except requests.ConnectionError as e:
+        return f"[TOOL_ERROR] Tavily connection failed: {e}"
+    except Exception as e:
+        return f"[TOOL_ERROR] Tavily search failed: {e}"
+
+    results = data.get("results", [])
+    if not results:
+        return "[NO_RESULTS] Tavily returned no results for this query."
+    return "\n\n".join(
+        f"[{r.get('title', 'No title')}]({r.get('url', '')})\n"
+        f"{r.get('content', '')[:500]}".strip()
+        for r in results[:k]
+    )
+
+
+def _duckduckgo_search(query: str, k: int = 5) -> str:
+    """Fallback: DuckDuckGo HTML scraping (unreliable, often 403/blocked)."""
     import requests
     from html.parser import HTMLParser
     from urllib.parse import parse_qs, urlparse
