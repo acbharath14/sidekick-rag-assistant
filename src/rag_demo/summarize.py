@@ -44,13 +44,17 @@ def _invoke(llm, prompt: str, timeout: float = 120.0) -> str:
         text = out.content if hasattr(out, "content") else str(out)
         return strip_think(text.strip())
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(_do)
-        try:
-            return future.result(timeout=timeout)
-        except (concurrent.futures.TimeoutError, Exception):
-            future.cancel()
-            return ""
+    # NOTE: not using a context manager — on timeout we abandon the stuck
+    # thread via shutdown(wait=False) instead of blocking until Ollama
+    # finishes (which is what `with` does and why the UI hung forever).
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = ex.submit(_do)
+    try:
+        return future.result(timeout=timeout)
+    except (concurrent.futures.TimeoutError, Exception):
+        return ""
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def summarize(text: str, settings: Settings | None = None) -> str:

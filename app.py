@@ -283,6 +283,13 @@ with st.sidebar:
     if corpus != "meridian" and corpus != "upload":
         settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
 
+    # Visible indicator when chatting with an uploaded file
+    if corpus == "upload":
+        st.info(
+            f"📄 Chatting with **{st.session_state.get('upload_name', 'uploaded file')}** — "
+            "answers come from this file. Switch the Corpus selector above to go back.",
+        )
+
     st.divider()
     st.subheader("Session")
     user_groups = st.text_input(
@@ -462,35 +469,51 @@ with st.sidebar:
             from rag_demo.summarize import summarize
 
             with st.spinner("Summarizing…"):
-                st.session_state.upload_summary = summarize(
-                    st.session_state.upload_text, settings
-                )
-        if st.button("💬 Ask about this file", use_container_width=True):
+                try:
+                    result = summarize(
+                        st.session_state.upload_text, settings
+                    )
+                    if not result or not result.strip():
+                        st.error("Summarize returned empty — check the terminal for errors.")
+                    else:
+                        st.session_state.upload_summary = result
+                except Exception as e:
+                    st.error(f"Summarize failed: {type(e).__name__}: {e}")
+                    # Also print to terminal for debugging
+                    print(f"[summarize] FAILED: {type(e).__name__}: {e}")
+        if st.button("💬 Chat with this file", use_container_width=True,
+                       help="Index this file and switch the chatbot to answer from it"):
             from langchain_community.vectorstores import FAISS
             from langchain_text_splitters import RecursiveCharacterTextSplitter
 
             from rag_demo.retriever import Retriever
 
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
+            with st.spinner(f"Indexing {st.session_state.upload_name}…"):
+                splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
+                )
+                chunks = splitter.split_text(st.session_state.upload_text)
+                source_name = f"upload:{st.session_state.upload_name}"
+                store = FAISS.from_texts(
+                    chunks,
+                    get_embeddings(settings),
+                    metadatas=[
+                        {"source": source_name, "allowed_groups": ["*"]} for _ in chunks
+                    ],
+                )
+                chunk_dicts = [
+                    {"text": c, "source": source_name, "allowed_groups": ["*"]}
+                    for c in chunks
+                ]
+                st.session_state.upload_retriever = Retriever(
+                    settings, store=store, chunks=chunk_dicts
+                )
+                st.session_state.corpus_override = "upload"
+            st.success(
+                f"Now chatting with **{st.session_state.upload_name}** "
+                f"({len(chunks)} chunks). Ask anything about it below. "
+                "Use the Corpus selector to switch back."
             )
-            chunks = splitter.split_text(st.session_state.upload_text)
-            source_name = f"upload:{st.session_state.upload_name}"
-            store = FAISS.from_texts(
-                chunks,
-                get_embeddings(settings),
-                metadatas=[
-                    {"source": source_name, "allowed_groups": ["*"]} for _ in chunks
-                ],
-            )
-            chunk_dicts = [
-                {"text": c, "source": source_name, "allowed_groups": ["*"]}
-                for c in chunks
-            ]
-            st.session_state.upload_retriever = Retriever(
-                settings, store=store, chunks=chunk_dicts
-            )
-            st.session_state.corpus_override = "upload"
             st.rerun()
         if st.button("🗑️ Clear upload", use_container_width=True):
             for key in (
