@@ -356,12 +356,6 @@ def stream_ask(
         yield {"token": visible}
         parts = [text]
     text = strip_think("".join(parts))
-    # Yield the filter's buffered tail as tokens so the streamed output
-    # matches the stored answer (test invariant). The tail is already
-    # included in `text` via parts, so don't append it again.
-    flushed = think_filter.flush()
-    if flushed:
-        yield {"token": flushed}
     text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
     # in the one-shot path), stream a general-knowledge answer instead.
@@ -370,11 +364,16 @@ def stream_ask(
         for i in range(0, len(fb_text), 50):
             yield {"token": fb_text[i : i + 50]}
         text = fb_text
-    elif head_buf:
-        # Flush any buffered head that wasn't yielded (non-abstention case
-        # where stream ended before reaching HEAD_CHECK_LEN).
-        for b in head_buf:
-            yield {"token": b}
+    else:
+        # Yield buffered head first (in order), then the filter's tail,
+        # so tokens == answer.text (test invariant). The tail is already
+        # included in `text` via parts, so don't append it again.
+        if head_buf:
+            for b in head_buf:
+                yield {"token": b}
+        flushed = think_filter.flush()
+        if flushed:
+            yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
     answer = Answer(
