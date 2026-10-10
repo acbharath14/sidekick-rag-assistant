@@ -1,0 +1,30 @@
+langchain>=0.3
+langchain-community>=0.3
+langchain-ollama>=0.2
+langchain-huggingface>=0.1
+faiss-cpu>=1.8
+lancedb>=0.10  # episodic (conversational) memory — vector + metadata in one table
+boto3>=1.28  # optional: AWS S3 enterprise connector (RAG_DEMO_AWS_S3_BUCKET)
+mcp>=1.0
+sentence-transformers>=2.0
+rank-bm25>=0.2.2
+requests>=2.31
+pypdf>=4.0
+python-docx>=1.1
+# Optional OCR fallback for scanned PDFs (pure Python; needs the tesseract
+# and poppler binaries on PATH — conda install -c conda-forge tesseract poppler).
+pytesseract>=0.3
+pdf2image>=1.17
+streamlit>=1.30
+pytest>=8.0
+# cryptography>=43 ships no Intel macOS wheels, so pip falls back to a Rust
+# source build on x86_64 Macs. Pin the last Intel-wheel release there;
+# other platforms keep resolving the latest.
+cryptography==42.0.8; sys_platform == "darwin" and platform_machine == "x86_64"
+# PyTorch dropped Intel macOS wheels after 2.2.2, and transformers>=5 disables
+# its torch integration unless torch>=2.5. On x86_64 Macs pin the last
+# fully-compatible pairing: torch 2.2.2 needs numpy<2, and transformers 4.x
+# (which pulls sentence-transformers 5.x) is the newest line working with it.
+# Other platforms keep resolving the latest.
+numpy<2; sys_platform == "darwin" and platform_machine == "x86_64"
+transformers<5; sys_platform == "darwin" and platform_machine == "x86_64"
