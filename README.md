@@ -52,6 +52,25 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 > trio (`numpy<2`, `transformers<5`) automatically. For snappier answers on
 > CPU, try `RAG_DEMO_MODEL=qwen2.5-coder:7b`.
 
+## Prerequisites
+
+**Ollama** must be installed and running — both the Streamlit UI and the CLI
+need it for answers (retrieval and tests use local fakes, no Ollama needed).
+
+```bash
+# 1. Install Ollama: https://ollama.com (macOS, Windows, Linux)
+# 2. Pull the default model (~5 GB):
+ollama pull qwen3:8b
+
+# 3. Verify it's running:
+curl localhost:11434/api/tags
+```
+
+Other models work too — set `RAG_DEMO_MODEL` (e.g. `qwen3:30b-a3b` for better
+quality if you have 32 GB RAM, `qwen2.5-coder:7b` for speed on CPU-only
+machines). The app keeps the model loaded with `keep_alive=30m` to avoid
+reload delays between prompts.
+
 ## Quickstart
 
 ```bash
