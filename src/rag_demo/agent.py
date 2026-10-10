@@ -295,31 +295,9 @@ def _parse_thought(text: str) -> list[dict]:
             return result[:3]
     except json.JSONDecodeError:
         pass
-    # Fallback: single search_docs query.
-    lines = [ln.strip("- *").strip() for ln in text.splitlines() if ln.strip()]
-    return [{"tool": "search_docs", "query": lines[0]}] if lines else []
-    """Parse the THOUGHT step: list of {tool, query}."""
-    text = strip_think(text).strip()
-    text = re.sub(r"```(?:json)?\n?", "", text).replace("```", "").strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            result = []
-            for item in data:
-                if isinstance(item, dict) and "query" in item:
-                    tool = item.get("tool", "search_docs")
-                    if tool not in TOOLS:
-                        tool = "search_docs"
-                    result.append({"tool": tool, "query": str(item["query"])})
-                elif isinstance(item, str):
-                    # Backwards compat: plain query strings → search_docs.
-                    result.append({"tool": "search_docs", "query": item})
-            return result[:3]
-    except json.JSONDecodeError:
-        pass
-    # Fallback: single search_docs query.
-    lines = [ln.strip("- *").strip() for ln in text.splitlines() if ln.strip()]
-    return [{"tool": "search_docs", "query": lines[0]}] if lines else []
+    # Fallback: if JSON parsing failed, return empty to trigger safe default.
+    # Never use raw malformed text (e.g. "{") as a search query.
+    return []
 
 
 def _parse_verify(text: str) -> dict:
@@ -386,7 +364,7 @@ def agentic_ask(
     _web_keywords = {
         "black friday", "deals", "deal ", "price", "walmart", "amazon",
         "target", "best buy", "costco", "sale", "discount", "coupon",
-        "news", "weather", "stock price", "election", "president",
+        "news", "weather", "temperature", "stock price", "election", "president",
         "celebrity", "movie", "sports", "game score",
     }
     _q_lower = question.lower()
