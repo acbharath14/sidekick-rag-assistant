@@ -53,10 +53,32 @@ def _search_web_tool(query: str, k: int = 5) -> str:
     import os
     import requests
 
+    # Check session cache first (defined in agentic_ask).
+    global _search_cache
+    cache = globals().get("_search_cache", {})
+    key = query.lower().strip()
+    if key in cache:
+        import time
+        entry = cache[key]
+        age = time.time() - entry["timestamp"]
+        if age <= 1800:  # 30-min TTL
+            return entry["result"] + f"\n\n[CACHED {int(age)}s ago]"
+        del cache[key]  # Stale — re-fetch.
+
     tavily_key = os.environ.get("RAG_DEMO_TAVILY_API_KEY")
     if tavily_key:
-        return _tavily_search(query, k, tavily_key)
-    return _duckduckgo_search(query, k)
+        result = _tavily_search(query, k, tavily_key)
+        backend = "tavily"
+    else:
+        result = _duckduckgo_search(query, k)
+        backend = "duckduckgo"
+
+    # Cache successful results.
+    if not result.startswith("[TOOL_ERROR]"):
+        import time
+        cache[key] = {"result": result, "timestamp": time.time(),
+                      "backend": backend}
+    return result
 
 
 def _tavily_search(query: str, k: int, api_key: str) -> str:
@@ -164,6 +186,9 @@ searchable sub-questions and choose the right tool for each.
 
 Current date: {current_date}
 
+Conversation history (for follow-up context):
+{history}
+
 Available tools:
 - search_docs: Search the local document corpus. The corpus contains ONLY \
 technical documentation (APIs, deployment guides, troubleshooting). Use this \
@@ -178,6 +203,7 @@ news event, or anything not in technical docs → use search_web.
 - If the question is about APIs, code, deployment, or technical troubleshooting \
 → use search_docs.
 - When in doubt, use search_web. The local corpus is very narrow.
+- Use conversation history to resolve ambiguous follow-ups.
 
 Examples:
 - "Walmart Black Friday deals" → search_web (retail, not tech docs)
@@ -198,6 +224,9 @@ the evidence gathered so far, decide if the question can be answered.
 
 Current date: {current_date}
 
+Conversation history:
+{history}
+
 User question: {question}
 
 Evidence:
@@ -210,6 +239,9 @@ from a tool error. Instead, note the tool failure in gaps and suggest retrying \
 or trying a different query.
 - [NO_RESULTS]: The search completed but found nothing. This suggests the \
 information may not exist, but try 1-2 alternative phrasings before concluding.
+- [CACHED Xs ago]: This result came from the session cache, not a fresh search. \
+If the question needs up-to-the-minute data and the cache is old, consider \
+re-searching.
 
 Reply with JSON: {{"sufficient": true/false, "gaps": ["what's still missing"], \
 "refined_queries": [{{"tool": "search_docs"|"search_web", "query": "..."}}], \
@@ -225,6 +257,9 @@ Cite sources with [filename] markers.
 
 Current date: {current_date}
 
+Conversation history (for follow-up coherence):
+{history}
+
 User question: {question}
 
 Evidence:
@@ -233,6 +268,8 @@ Evidence:
 IMPORTANT: If the evidence contains [TOOL_ERROR] markers, do NOT claim the \
 information doesn't exist. Instead, say: "I couldn't retrieve [X] because the \
 search tool failed: [reason]." Be honest about tool limitations.
+
+If this is a follow-up, frame the answer in the context of the prior conversation.
 
 Answer concisely with citations:"""
 
@@ -324,6 +361,7 @@ def agentic_ask(
     verbose: bool = False,
     show_plan: bool = False,
     on_progress: object = None,
+    history: list[tuple[str, str]] | None = None,
 ) -> Answer:
     """Run the ReAct loop (Thought → Action → Observation).
 
@@ -333,9 +371,48 @@ def agentic_ask(
     on_progress: optional callable(phase, message) for live UI updates.
         phase is one of "thought", "action", "observation", "synthesize".
 
+    history: optional list of (question, answer) tuples for follow-up context.
+        Follow-ups like "what about Target?" are rewritten to standalone
+        questions using this history.
+
     Returns an Answer with sources from all tool calls.
     """
     import time
+
+    # ---- Search result cache (session-scoped, TTL-monitored) ----
+    # Key: normalized query. Value: {result, timestamp, backend}.
+    # Staleness mitigation: entries older than CACHE_TTL are re-fetched;
+    # cache hits are marked with age so the LLM knows they're not fresh.
+    global _search_cache
+    if "_search_cache" not in globals():
+        _search_cache = {}
+    CACHE_TTL_SECONDS = 1800  # 30 minutes
+
+    def _cache_get(query: str) -> str | None:
+        key = query.lower().strip()
+        entry = _search_cache.get(key)
+        if not entry:
+            return None
+        age = time.time() - entry["timestamp"]
+        if age > CACHE_TTL_SECONDS:
+            # Stale — evict and re-fetch.
+            del _search_cache[key]
+            return None
+        return entry["result"] + f"\n\n[CACHED {int(age)}s ago]"
+
+    def _cache_put(query: str, result: str, backend: str):
+        # Don't cache errors — only successful results.
+        if result.startswith("[TOOL_ERROR]"):
+            return
+        _search_cache[query.lower().strip()] = {
+            "result": result,
+            "timestamp": time.time(),
+            "backend": backend,
+        }
+
+    def clear_search_cache():
+        """Clear the session search cache. Called from UI."""
+        _search_cache.clear()
 
     settings = settings or get_settings()
     llm = get_llm(settings)
@@ -359,22 +436,47 @@ def agentic_ask(
     from datetime import date
     current_date = date.today().isoformat()
 
+    # Rewrite follow-ups to standalone questions using conversation history.
+    # "what about Target?" + history("Walmart Black Friday deals") →
+    # "Target Black Friday deals 2026". Must run BEFORE the fast-path so the
+    # keyword check sees the resolved query, not the vague follow-up.
+    effective_question = question
+    if history:
+        _progress("thought", "Rewriting follow-up with conversation context...")
+        try:
+            from .rewrite import rewrite_query
+            rewritten = rewrite_query(question, history, llm)
+            if rewritten and rewritten.strip() and rewritten != question:
+                effective_question = rewritten.strip()
+                _progress("thought", f"Rewritten: {effective_question[:60]}")
+        except Exception:
+            pass  # Fall back to original question.
+
+    # Format history for prompts.
+    history_text = ""
+    if history:
+        history_text = "\n".join(
+            f"Q: {q}\nA: {a[:300]}" for q, a in history[-3:]
+        )
+
     # Fast path: obvious web queries skip the LLM planning call.
     # Saves 20-30s on CPU by going straight to search_web.
+    # Uses effective_question (rewritten) so follow-ups route correctly.
     _web_keywords = {
         "black friday", "deals", "deal ", "price", "walmart", "amazon",
         "target", "best buy", "costco", "sale", "discount", "coupon",
         "news", "weather", "temperature", "stock price", "election", "president",
         "celebrity", "movie", "sports", "game score",
     }
-    _q_lower = question.lower()
+    _q_lower = effective_question.lower()
     if any(kw in _q_lower for kw in _web_keywords):
         _progress("thought", "Fast path: web query detected, skipping LLM planning")
-        plan = [{"tool": "search_web", "query": question}]
+        plan = [{"tool": "search_web", "query": effective_question}]
     else:
         _progress("thought", "Planning search strategy...")
         thought_text = _invoke(THOUGHT_PROMPT.format(
-            question=question, current_date=current_date
+            question=effective_question, current_date=current_date,
+            history=history_text or "No prior conversation."
         ))
         plan = _parse_thought(thought_text)
         if not plan:
@@ -450,8 +552,9 @@ def agentic_ask(
         _progress("observation", "Evaluating if evidence is sufficient...")
         evidence_text = "\n\n".join(all_evidence)
         obs_text = _invoke(OBSERVATION_PROMPT.format(
-            question=question, evidence=evidence_text,
-            current_date=current_date
+            question=effective_question, evidence=evidence_text,
+            current_date=current_date,
+            history=history_text or "No prior conversation."
         ))
         verdict = _parse_verify(obs_text)
         _progress(
@@ -485,8 +588,9 @@ def agentic_ask(
     _progress("synthesize", "Synthesizing final answer from all evidence...")
     evidence_text = "\n\n".join(all_evidence)
     answer_text = _invoke(SYNTHESIZE_PROMPT.format(
-        question=question, evidence=evidence_text,
-        current_date=current_date
+        question=effective_question, evidence=evidence_text,
+        current_date=current_date,
+        history=history_text or "No prior conversation."
     ))
     _progress("synthesize", "Done.")
 
