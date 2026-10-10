@@ -186,6 +186,10 @@ CORPUS_LABELS = {
     "playwright-docs": "Playwright docs",
     "github-docs": "GitHub repo docs",
     "confluence-mock": "Confluence (mock)",
+    "confluence": "Confluence (real)",
+    "jira": "Jira issues",
+    "outlook": "Outlook emails",
+    "aws-s3": "AWS S3 documents",
 }
 
 SUGGESTIONS = {
@@ -278,6 +282,23 @@ with st.sidebar:
         help="Build an index first: python -m rag_demo.ingest --source <name>",
         key="corpus-selector",
     )
+
+    # Agentic mode toggle (ReAct: Thought → Action → Observation).
+    agentic_mode = st.toggle(
+        "🤖 Agentic mode",
+        value=st.session_state.get("agentic_mode", False),
+        help="Multi-step reasoning: plans searches, executes tools, verifies, refines.",
+        key="agentic-toggle",
+    )
+    st.session_state["agentic_mode"] = agentic_mode
+    if agentic_mode:
+        show_plan = st.toggle(
+            "Show plan before executing",
+            value=st.session_state.get("agentic_show_plan", True),
+            help="Display the agent's plan as a flowchart for approval.",
+            key="agentic-show-plan",
+        )
+        st.session_state["agentic_show_plan"] = show_plan
     upload_retriever = (
         st.session_state.get("upload_retriever") if corpus == "upload" else None
     )
@@ -291,6 +312,10 @@ with st.sidebar:
         "playwright-docs": "🎭 **Playwright docs** — browser automation",
         "confluence-mock": "📝 **Confluence mock** — simulated wiki pages",
         "github-docs": "🐙 **GitHub docs** — repository markdown files",
+        "confluence": "📝 **Confluence** — real wiki pages",
+        "jira": "🎫 **Jira** — issues and tickets",
+        "outlook": "📧 **Outlook** — emails",
+        "aws-s3": "☁️ **AWS S3** — bucket documents",
     }
     if corpus == "upload":
         _ctx_label = (
@@ -725,27 +750,105 @@ if question and index_ok:
     with st.chat_message("assistant", avatar="📚"):
         holder: dict = {}
         thinking = st.empty()
-        thinking.markdown(
-            '<span class="thinking-dots">🧠 Thinking</span>',
-            unsafe_allow_html=True,
-        )
 
-        def token_stream():
-            first_token = True
-            for event in stream_ask(
-                question,
-                settings,
-                history=ask_history,
-                user_groups=groups,
-                retriever=upload_retriever,
-            ):
-                if "token" in event:
-                    if first_token:
-                        thinking.empty()
-                        first_token = False
-                    yield event["token"]
-                else:
-                    holder["answer"] = event["answer"]
+        # Agentic mode: ReAct loop with optional plan approval.
+        if st.session_state.get("agentic_mode", False):
+            from rag_demo.agent import (
+                agentic_ask,
+                format_plan_as_ascii,
+                format_plan_as_mermaid,
+                _parse_thought,
+                THOUGHT_PROMPT,
+                TOOLS,
+            )
+            from rag_demo.chain import get_llm, strip_think
+
+            thinking.markdown(
+                '<span class="thinking-dots">🤖 Planning</span>',
+                unsafe_allow_html=True,
+            )
+            # THOUGHT: generate plan.
+            llm = get_llm(settings)
+            out = llm.invoke(THOUGHT_PROMPT.format(question=question))
+            thought_text = out.content if hasattr(out, "content") else str(out)
+            plan = _parse_thought(strip_think(thought_text.strip()))
+            if not plan:
+                plan = [{"tool": "search_docs", "query": question}]
+            thinking.empty()
+
+            # Show plan for approval (if enabled).
+            if st.session_state.get("agentic_show_plan", True):
+                st.markdown("**🤖 Agent Plan:**")
+                # Mermaid flowchart (renders in Streamlit via html component).
+                mermaid = format_plan_as_mermaid(plan, question)
+                st.components.v1.html(
+                    f"""
+                    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+                    <div class="mermaid">{mermaid}</div>
+                    <script>mermaid.initialize({{startOnLoad:true}});</script>
+                    """,
+                    height=300,
+                )
+                # ASCII fallback in expander.
+                with st.expander("Plan (text)"):
+                    st.code(format_plan_as_ascii(plan, question))
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    execute = st.button("✅ Execute", key=f"exec_{len(st.session_state.messages)}")
+                with col2:
+                    cancel = st.button("❌ Cancel", key=f"cancel_{len(st.session_state.messages)}")
+                if cancel:
+                    st.info("Plan cancelled.")
+                    st.stop()
+                if not execute:
+                    st.info("Review the plan above, then click Execute.")
+                    st.stop()
+
+            # Execute the agentic loop.
+            with st.status("🤖 Running agent...", expanded=True) as status:
+                st.write("**Thought:** Planning searches...")
+                answer = agentic_ask(
+                    question, settings,
+                    verbose=False, show_plan=False,
+                )
+                st.write(f"**Action:** Executed {len(answer.sources)} tool calls")
+                st.write("**Observation:** Synthesizing answer...")
+                status.update(label="✅ Done", state="complete")
+
+            st.markdown(answer.text)
+            if answer.sources:
+                with st.expander("Sources"):
+                    for s in answer.sources:
+                        st.markdown(f"- {s}")
+            # Save to history.
+            st.session_state.messages.append({
+                "role": "assistant", "text": answer.text,
+                "sources": answer.sources,
+            })
+            st.session_state.history.append((question, answer.text))
+        else:
+            thinking.markdown(
+                '<span class="thinking-dots">🧠 Thinking</span>',
+                unsafe_allow_html=True,
+            )
+
+            def token_stream():
+                first_token = True
+                for event in stream_ask(
+                    question,
+                    settings,
+                    history=ask_history,
+                    user_groups=groups,
+                    retriever=upload_retriever,
+                ):
+                    if "token" in event:
+                        if first_token:
+                            thinking.empty()
+                            first_token = False
+                        yield event["token"]
+                    else:
+                        holder["answer"] = event["answer"]
 
         try:
             st.write_stream(token_stream())
