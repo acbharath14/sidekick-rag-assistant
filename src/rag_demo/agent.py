@@ -81,27 +81,36 @@ def _search_web_tool(query: str, k: int = 5) -> str:
     return result
 
 
-def _tavily_search(query: str, k: int, api_key: str) -> str:
-    """Search via Tavily API (reliable, AI-optimized)."""
+def _tavily_search(query: str, k: int, api_key: str,
+                   include_content: bool = False) -> str:
+    """Search via Tavily API (reliable, AI-optimized).
+
+    If include_content=True, returns full page markdown (truncated to ~3000
+    chars per result). Use for deals/prices where snippets aren't enough.
+    """
     import requests
+
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": k,
+        "search_depth": "basic",
+        "include_answer": False,
+    }
+    if include_content:
+        payload["include_raw_content"] = "markdown"
 
     try:
         resp = requests.post(
             "https://api.tavily.com/search",
             headers={"Content-Type": "application/json"},
-            json={
-                "api_key": api_key,
-                "query": query,
-                "max_results": k,
-                "search_depth": "basic",
-                "include_answer": False,
-            },
-            timeout=20,
+            json=payload,
+            timeout=30 if include_content else 20,
         )
         resp.raise_for_status()
         data = resp.json()
     except requests.Timeout:
-        return "[TOOL_ERROR] Tavily search timed out after 20s"
+        return "[TOOL_ERROR] Tavily search timed out"
     except requests.ConnectionError as e:
         return f"[TOOL_ERROR] Tavily connection failed: {e}"
     except Exception as e:
@@ -110,11 +119,65 @@ def _tavily_search(query: str, k: int, api_key: str) -> str:
     results = data.get("results", [])
     if not results:
         return "[NO_RESULTS] Tavily returned no results for this query."
-    return "\n\n".join(
-        f"[{r.get('title', 'No title')}]({r.get('url', '')})\n"
-        f"{r.get('content', '')[:500]}".strip()
-        for r in results[:k]
-    )
+    parts = []
+    for r in results[:k]:
+        title = r.get('title', 'No title')
+        url = r.get('url', '')
+        if include_content:
+            content = r.get('raw_content', '') or r.get('content', '')
+            # Truncate to bound LLM tokens (~3000 chars ≈ 750 tokens).
+            content = content[:3000]
+        else:
+            content = r.get('content', '')[:500]
+        parts.append(f"[{title}]({url})\n{content}".strip())
+    return "\n\n".join(parts)
+
+
+def _extract_pages_tool(urls: list[str], query: str = "") -> str:
+    """Tool: fetch full page content from URLs via Tavily Extract.
+
+    Use after search_web finds relevant pages but snippets lack details
+    (prices, dates, specs). Max 5 URLs per call.
+    """
+    import os
+    import requests
+
+    api_key = os.environ.get("RAG_DEMO_TAVILY_API_KEY")
+    if not api_key:
+        return "[TOOL_ERROR] Tavily API key not set — cannot extract pages."
+
+    urls = urls[:5]  # Hard cap.
+    try:
+        resp = requests.post(
+            "https://api.tavily.com/extract",
+            headers={"Content-Type": "application/json"},
+            json={
+                "api_key": api_key,
+                "urls": urls,
+                "query": query,
+                "chunks_per_source": 3,
+                "extract_depth": "basic",
+                "format": "markdown",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.Timeout:
+        return "[TOOL_ERROR] Tavily extract timed out after 30s"
+    except Exception as e:
+        return f"[TOOL_ERROR] Tavily extract failed: {e}"
+
+    parts = []
+    for r in data.get("results", []):
+        url = r.get("url", "")
+        content = r.get("raw_content", "")[:4000]  # Bound tokens.
+        parts.append(f"--- {url} ---\n{content}".strip())
+    for f in data.get("failed_results", []):
+        parts.append(f"--- {f} ---\n[EXTRACTION FAILED]")
+    if not parts:
+        return "[NO_RESULTS] No content extracted from the provided URLs."
+    return "\n\n".join(parts)
 
 
 def _duckduckgo_search(query: str, k: int = 5) -> str:
@@ -177,7 +240,8 @@ def _duckduckgo_search(query: str, k: int = 5) -> str:
 # Available tools for the agent. The THOUGHT step chooses which to use.
 TOOLS = {
     "search_docs": "Search the local document corpus (use for questions about the indexed docs).",
-    "search_web": "Search the web via DuckDuckGo (use for current events, prices, deals, general knowledge).",
+    "search_web": "Search the web via Tavily (use for current events, prices, deals, general knowledge). Returns snippets.",
+    "extract_pages": "Fetch FULL page content from URLs (use after search_web when snippets lack prices, dates, or details).",
 }
 
 
@@ -195,7 +259,10 @@ technical documentation (APIs, deployment guides, troubleshooting). Use this \
 ONLY if the question is about software, APIs, or technical documentation.
 - search_web: Search the web. Use this for EVERYTHING else: current events, \
 prices, deals, products, companies, people, news, shopping, reviews, \
-general knowledge, or any question not about the technical docs.
+general knowledge, or any question not about the technical docs. Returns snippets.
+- extract_pages: Fetch FULL page content from specific URLs. Use AFTER search_web \
+when snippets lack the details you need (exact prices, dates, specs, tables). \
+Pass comma-separated URLs as the query.
 
 RULES:
 - If the question mentions a retailer, product, deal, price, company, celebrity, \
@@ -204,6 +271,8 @@ news event, or anything not in technical docs → use search_web.
 → use search_docs.
 - When in doubt, use search_web. The local corpus is very narrow.
 - Use conversation history to resolve ambiguous follow-ups.
+- For shopping/deals questions: search_web first, then extract_pages on the \
+top 2-3 most relevant URLs to get actual prices.
 
 Examples:
 - "Walmart Black Friday deals" → search_web (retail, not tech docs)
@@ -270,6 +339,11 @@ information doesn't exist. Instead, say: "I couldn't retrieve [X] because the \
 search tool failed: [reason]." Be honest about tool limitations.
 
 If this is a follow-up, frame the answer in the context of the prior conversation.
+
+For shopping/deals questions, present results as a structured table:
+| Product | Retailer | Regular Price | Deal Price | Discount | Status | Source |
+Status is one of: announced (retailer confirmed), predicted (analyst/blog),
+leaked (unofficial early info), historical (prior year reference).
 
 Answer concisely with citations:"""
 
@@ -530,9 +604,26 @@ def agentic_ask(
     all_sources: set[str] = set()
     iteration = 0
 
+    # Credit guardrail: max page extractions per agent run.
+    import os
+    _max_extracts = int(os.environ.get("RAG_DEMO_MAX_EXTRACTS", "3"))
+    _extract_count = 0
+
     def _dispatch(tool: str, query: str) -> str:
+        nonlocal _extract_count
         if tool == "search_web":
             return _search_web_tool(query)
+        if tool == "extract_pages":
+            # query is a comma-separated URL list for this tool.
+            if _extract_count >= _max_extracts:
+                return (f"[TOOL_ERROR] Extraction limit reached "
+                        f"({_max_extracts} per run). Use search results.")
+            urls = [u.strip() for u in query.split(",") if u.strip()]
+            _extract_count += 1
+            _progress("action",
+                      f"Extracting {len(urls)} page(s) "
+                      f"({_extract_count}/{_max_extracts})")
+            return _extract_pages_tool(urls, effective_question)
         return _search_docs_tool(query, settings=settings)
 
     while iteration < max_iterations:
