@@ -44,6 +44,7 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 | LLM | Ollama `qwen3:8b` at `localhost:11434` | `RAG_DEMO_MODEL`, `RAG_DEMO_BASE_URL` |
 | Retrieval | dense vector search | `RAG_DEMO_RETRIEVAL=hybrid` (BM25+dense) |
 | Rerank | off | `RAG_DEMO_RERANK=1` (cross-encoder, downloads once) |
+| Web search (agentic) | DuckDuckGo scraping (unreliable) | `RAG_DEMO_TAVILY_API_KEY` (recommended) |
 | Tests/CI | deterministic fakes | `RAG_DEMO_FAKE=1` |
 
 > **Intel Mac note:** PyTorch ships no Intel-macOS wheels past 2.2.2, and
@@ -51,25 +52,6 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 > machine runs everything on CPU. `requirements.txt` pins the compatible
 > trio (`numpy<2`, `transformers<5`) automatically. For snappier answers on
 > CPU, try `RAG_DEMO_MODEL=qwen2.5-coder:7b`.
-
-## Prerequisites
-
-**Ollama** must be installed and running — both the Streamlit UI and the CLI
-need it for answers (retrieval and tests use local fakes, no Ollama needed).
-
-```bash
-# 1. Install Ollama: https://ollama.com (macOS, Windows, Linux)
-# 2. Pull the default model (~5 GB):
-ollama pull qwen3:8b
-
-# 3. Verify it's running:
-curl localhost:11434/api/tags
-```
-
-Other models work too — set `RAG_DEMO_MODEL` (e.g. `qwen3:30b-a3b` for better
-quality if you have 32 GB RAM, `qwen2.5-coder:7b` for speed on CPU-only
-machines). The app keeps the model loaded with `keep_alive=30m` to avoid
-reload delays between prompts.
 
 ## Quickstart
 
@@ -108,7 +90,7 @@ RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 PYTHONPATH=src python -m rag_demo.ingest --source playwright-docs --language python
 
 # Any GitHub repo's markdown docs via the API (public repos need no token)
-PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo acbharath14/sidekick-rag-assistant
+PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo owner/name
 # Private repos: export RAG_DEMO_GITHUB_TOKEN=<token>  (never commit it)
 
 # Simulated Confluence (JSON fixtures mirroring the REST API shape)
@@ -123,9 +105,9 @@ there too.
 
 ```bash
 PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
-RAG_DEMO_USER_GROUPS=ops-all PYTHONPATH=src streamlit run app.py
-# Ask "What are the driver pay bands?" -> the model can't see that page.
-# Now restart with RAG_DEMO_USER_GROUPS=ops-leads -> it can.
+RAG_DEMO_USER_GROUPS=eng-all PYTHONPATH=src streamlit run app.py
+# Ask "What are the salary bands?" -> the model can't see that page.
+# Now restart with RAG_DEMO_USER_GROUPS=eng-leads -> it can.
 ```
 
 Restricted chunks are filtered *before* the prompt — the LLM never sees
@@ -177,10 +159,6 @@ OCR automatically — first install the binaries:
 conda install -c conda-forge tesseract poppler
 ```
 
-> **Try it:** a sample scanned PDF is included at `samples/ocr_test_scanned.pdf`.
-> Upload it via the sidebar to see OCR extraction, summarization, and
-> file-chat in action.
-
 In the Streamlit sidebar: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
 10 MB cap). The app extracts the text in memory, offers a **📝 Summarize**
 button (map-reduce for long docs), and **💬 Ask about this file** builds an
@@ -215,6 +193,41 @@ Add to your MCP client config (e.g. Claude Code):
 Then ask your client to "search the Meridian docs for the rollback procedure"
 — it will call `search_docs` and answer from the corpus.
 
+## Agentic RAG
+
+Beyond single-shot retrieval, the agent (`rag_demo/agent.py`) runs a **ReAct loop**
+(Thought → Action → Observation) that plans multi-step research, calls tools,
+evaluates evidence, and refines its approach — up to 4 iterations before synthesizing.
+
+**Tools:**
+- `search_docs` — local FAISS corpus (technical documentation)
+- `search_web` — web search via Tavily API (recommended) or DuckDuckGo fallback
+
+**Features:**
+- **Smart routing** — the planner picks `search_docs` for API/code questions and
+  `search_web` for everything else (prices, news, general knowledge). A fast-path
+  heuristic skips the LLM planning call for obvious web queries, saving 20-30s on CPU.
+- **Tavily backend** — set `RAG_DEMO_TAVILY_API_KEY` (free tier: 1,000 searches/month
+  at tavily.com) for reliable web search. Falls back to DuckDuckGo HTML scraping
+  without a key (often blocked/rate-limited). Enter the key in the Streamlit sidebar
+  under Agentic mode, or as an environment variable.
+- **Conversation memory** — follow-ups like "what about Target?" are rewritten to
+  standalone questions using chat history, before routing. History is passed to all
+  agent prompts for coherent multi-turn research.
+- **Search cache** — web results are cached per-session (30-min TTL) to save API
+  credits. Cached hits are marked `[CACHED Xs ago]`; stale entries auto-refresh.
+  Clear via the sidebar "🗑️ Clear search cache" button.
+- **Tool-failure honesty** — `[TOOL_ERROR]` (network/timeout/blocked) is distinguished
+  from `[NO_RESULTS]` (genuinely empty). The agent never claims "doesn't exist" from
+  a tool failure.
+- **Plan approval** — optional ASCII flowchart preview with Execute/Edit/Cancel
+  before the agent runs (CLI and Streamlit).
+
+Enable in the Streamlit sidebar ("🤖 Agentic mode") or via CLI:
+```bash
+PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
+```
+
 ## Project layout
 
 ```
@@ -230,6 +243,8 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 │   ├── rerank.py            # cross-encoder reranking (opt-in)
 │   ├── rewrite.py           # multi-turn query rewriting
 │   ├── chain.py             # RAG chain with citations (+ streaming)
+│   ├── agent.py             # agentic RAG: ReAct loop (Thought → Action → Observation)
+│   ├── agentic_cli.py       # CLI for agentic mode with plan approval
 │   ├── audit.py             # opt-in JSONL audit log
 │   ├── extract.py           # file text extraction (pdf/docx/txt/md/csv)
 │   ├── summarize.py         # map-reduce document summarization

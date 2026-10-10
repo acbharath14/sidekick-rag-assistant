@@ -440,28 +440,64 @@ with st.sidebar:
             st.session_state["tavily_key"] = tavily_key
         # Web search diagnostic.
         if st.button("🌐 Test web search", key="test_web_search",
-                     help="Check if DuckDuckGo is reachable from this machine"):
+                     help="Check which search backend is active and if it works"):
             with st.spinner("Testing..."):
-                import requests
-                try:
-                    resp = requests.post(
-                        "https://html.duckduckgo.com/html/",
-                        data={"q": "test"},
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200 and "result__a" in resp.text:
-                        st.success("✅ Web search working")
-                    elif resp.status_code == 200:
-                        st.warning("⚠️ Reached DuckDuckGo but no results parsed (HTML changed?)")
-                    else:
-                        st.error(f"❌ HTTP {resp.status_code}")
-                except requests.Timeout:
-                    st.error("❌ Timeout — network slow or DuckDuckGo blocked")
-                except requests.ConnectionError as e:
-                    st.error(f"❌ Connection failed: {e}")
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
+                import os, requests
+                tavily_key = os.environ.get("RAG_DEMO_TAVILY_API_KEY")
+                if tavily_key:
+                    # Test Tavily backend.
+                    try:
+                        resp = requests.post(
+                            "https://api.tavily.com/search",
+                            headers={"Content-Type": "application/json"},
+                            json={"api_key": tavily_key, "query": "test",
+                                  "max_results": 1},
+                            timeout=15,
+                        )
+                        if resp.status_code == 200:
+                            n = len(resp.json().get("results", []))
+                            st.success(f"✅ Tavily working ({n} result(s) for test query)")
+                        elif resp.status_code == 401:
+                            st.error("❌ Tavily: invalid API key (401)")
+                        else:
+                            st.error(f"❌ Tavily HTTP {resp.status_code}: "
+                                     f"{resp.text[:200]}")
+                    except requests.Timeout:
+                        st.error("❌ Tavily timeout — network issue")
+                    except Exception as e:
+                        st.error(f"❌ Tavily error: {e}")
+                else:
+                    st.info("ℹ️ No Tavily key set — using DuckDuckGo fallback")
+                    try:
+                        resp = requests.post(
+                            "https://html.duckduckgo.com/html/",
+                            data={"q": "test"},
+                            headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=10,
+                        )
+                        if resp.status_code == 200 and "result__a" in resp.text:
+                            st.success("✅ Web search working")
+                        elif resp.status_code == 200:
+                            st.warning("⚠️ Reached DuckDuckGo but no results parsed "
+                                       "(HTML changed?)")
+                        else:
+                            st.error(f"❌ HTTP {resp.status_code}")
+                    except requests.Timeout:
+                        st.error("❌ Timeout — network slow or DuckDuckGo blocked")
+                    except requests.ConnectionError as e:
+                        st.error(f"❌ Connection failed: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+        # Search cache management.
+        if st.button("🗑️ Clear search cache", key="clear_search_cache",
+                     help="Clear cached web search results (they expire after 30 min anyway)"):
+            try:
+                from rag_demo.agent import _search_cache
+                n = len(_search_cache)
+                _search_cache.clear()
+                st.success(f"✅ Cleared {n} cached result(s)")
+            except Exception:
+                st.info("Cache is empty")
 
     # Enterprise connectors: PAT/token configuration + index building.
     # Tokens are kept in session state (in-memory only, cleared on restart).
@@ -938,6 +974,7 @@ if agentic_pending and index_ok:
                         pending_q, settings,
                         verbose=False, show_plan=False,
                         on_progress=_on_progress,
+                        history=st.session_state.get("history", []),
                     )
                 except Exception as e:
                     status.update(label="❌ Failed", state="error")
@@ -1004,8 +1041,13 @@ if question and index_ok:
             # THOUGHT: generate plan.
             from datetime import date
             llm = get_llm(settings)
+            hist = st.session_state.get("history", [])
+            hist_text = "\n".join(
+                f"Q: {q}\nA: {a[:300]}" for q, a in hist[-3:]
+            ) if hist else "No prior conversation."
             out = llm.invoke(THOUGHT_PROMPT.format(
-                question=question, current_date=date.today().isoformat()
+                question=question, current_date=date.today().isoformat(),
+                history=hist_text
             ))
             thought_text = out.content if hasattr(out, "content") else str(out)
             plan = _parse_thought(strip_think(thought_text.strip()))
@@ -1030,6 +1072,7 @@ if question and index_ok:
                 answer = agentic_ask(
                     question, settings,
                     verbose=False, show_plan=False,
+                    history=st.session_state.get("history", []),
                 )
                 st.write(f"**Action:** Executed {len(answer.sources)} tool calls")
                 st.write("**Observation:** Synthesizing answer...")
