@@ -58,11 +58,11 @@ def _search_web_tool(query: str, k: int = 5) -> str:
         )
         resp.raise_for_status()
     except requests.Timeout:
-        return "Web search failed: timeout after 15s (network slow or blocked)"
+        return "[TOOL_ERROR] Web search timed out after 15s (network slow or blocked)"
     except requests.ConnectionError as e:
-        return f"Web search failed: connection error ({e})"
+        return f"[TOOL_ERROR] Web search connection failed: {e}"
     except Exception as e:
-        return f"Web search failed: {e}"
+        return f"[TOOL_ERROR] Web search failed: {e}"
 
     class _Parser(HTMLParser):
         def __init__(self):
@@ -97,7 +97,7 @@ def _search_web_tool(query: str, k: int = 5) -> str:
     parser.feed(resp.text)
     results = parser.results[:k]
     if not results:
-        return "No web results found."
+        return "[NO_RESULTS] Web search returned no results for this query."
     return "\n\n".join(f"[{r['title']}]({r['url']})" for r in results)
 
 
@@ -152,9 +152,20 @@ User question: {question}
 Evidence:
 {evidence}
 
+IMPORTANT - Tool status markers:
+- [TOOL_ERROR]: The search tool itself failed (network, timeout, blocked). \
+This is NOT evidence that no information exists. Do NOT conclude "doesn't exist" \
+from a tool error. Instead, note the tool failure in gaps and suggest retrying \
+or trying a different query.
+- [NO_RESULTS]: The search completed but found nothing. This suggests the \
+information may not exist, but try 1-2 alternative phrasings before concluding.
+
 Reply with JSON: {{"sufficient": true/false, "gaps": ["what's still missing"], \
-"refined_queries": [{{"tool": "search_docs"|"search_web", "query": "..."}}]}}
+"refined_queries": [{{"tool": "search_docs"|"search_web", "query": "..."}}], \
+"tool_errors": ["describe any tool failures separately"]}}
 Use search_web for gaps needing current/external info, search_docs for corpus gaps.
+If evidence contains [TOOL_ERROR], ALWAYS set sufficient=false and explain the \
+tool failure in gaps — never claim the information doesn't exist.
 
 JSON:"""
 
@@ -167,6 +178,10 @@ User question: {question}
 
 Evidence:
 {evidence}
+
+IMPORTANT: If the evidence contains [TOOL_ERROR] markers, do NOT claim the \
+information doesn't exist. Instead, say: "I couldn't retrieve [X] because the \
+search tool failed: [reason]." Be honest about tool limitations.
 
 Answer concisely with citations:"""
 
