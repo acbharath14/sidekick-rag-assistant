@@ -654,7 +654,11 @@ for msg in st.session_state.messages:
     if _search and _search.lower() not in msg.get("text", "").lower():
         continue
     with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "📚"):
-        st.markdown(msg["text"])
+        # Strip any think blocks that leaked into stored messages
+        # (from before the filter fix).
+        from rag_demo.chain import strip_think
+
+        st.markdown(strip_think(msg["text"]))
         if msg.get("sources"):
             pills = "".join(
                 f'<span class="citation-pill">{s}</span>' for s in msg["sources"]
