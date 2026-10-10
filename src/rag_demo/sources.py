@@ -298,3 +298,14 @@ class MockConfluenceSource(DocumentSource):
 
 SOURCES["github-docs"] = GitHubDocsSource
 SOURCES["confluence-mock"] = MockConfluenceSource
+
+# Enterprise connectors (Jira, Confluence, Outlook, AWS S3). These are
+# optional — they require credentials via env vars and their dependencies
+# (boto3 for AWS) may not be installed. Registered lazily so a missing
+# dependency doesn't break the default sources.
+try:
+    from .enterprise import ENTERPRISE_SOURCES
+
+    SOURCES.update(ENTERPRISE_SOURCES)
+except ImportError:
+    pass

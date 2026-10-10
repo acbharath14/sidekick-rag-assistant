@@ -18,6 +18,10 @@ INDEX_DIRS = {
     "playwright-docs": ".faiss_index_playwright",
     "github-docs": ".faiss_index_github",
     "confluence-mock": ".faiss_index_confluence",
+    "confluence": ".faiss_index_confluence_real",
+    "jira": ".faiss_index_jira",
+    "outlook": ".faiss_index_outlook",
+    "aws-s3": ".faiss_index_s3",
 }
 
 
@@ -123,7 +127,7 @@ def main() -> None:
         "--repo",
         default=None,
         help="with --source github-docs, the repo as owner/name "
-        "(default: acbharath14/sidekick-rag-assistant; or set RAG_DEMO_GITHUB_REPO)",
+        "(or set RAG_DEMO_GITHUB_REPO)",
     )
     parser.add_argument(
         "--incremental",
@@ -152,6 +156,11 @@ def main() -> None:
         from .sources import MockConfluenceSource
 
         source = MockConfluenceSource()
+    elif args.source in ("confluence", "jira", "outlook", "aws-s3"):
+        from .enterprise import ENTERPRISE_SOURCES
+
+        source_cls = ENTERPRISE_SOURCES[args.source]
+        source = source_cls()
     else:
         source = MarkdownDirectorySource(settings.docs_dir)
 

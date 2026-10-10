@@ -4,6 +4,7 @@ langchain-ollama>=0.2
 langchain-huggingface>=0.1
 faiss-cpu>=1.8
 lancedb>=0.10  # episodic (conversational) memory — vector + metadata in one table
+boto3>=1.28  # optional: AWS S3 enterprise connector (RAG_DEMO_AWS_S3_BUCKET)
 mcp>=1.0
 sentence-transformers>=2.0
 rank-bm25>=0.2.2
