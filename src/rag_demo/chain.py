@@ -355,7 +355,13 @@ def stream_ask(
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]
-    text = strip_think("".join(parts)) + think_filter.flush()
+    text = strip_think("".join(parts))
+    # Yield the filter's buffered tail as tokens so the streamed output
+    # matches the stored answer (test invariant). The tail is already
+    # included in `text` via parts, so don't append it again.
+    flushed = think_filter.flush()
+    if flushed:
+        yield {"token": flushed}
     text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
     # in the one-shot path), stream a general-knowledge answer instead.
