@@ -263,6 +263,133 @@ def _persist_active_chat() -> None:
 
 
 # ---------------------------------------------------------------- sidebar ---
+
+
+def _enterprise_ui():
+    """Sidebar UI for enterprise connector credentials and index building."""
+    import os
+
+    # --- Confluence ---
+    with st.expander("📝 Confluence", expanded=False):
+        c_url = st.text_input(
+            "URL", value=st.session_state.get("ent_confluence_url", ""),
+            placeholder="https://your-domain.atlassian.net/wiki",
+            key="ent_c_url",
+        )
+        c_token = st.text_input(
+            "Token (PAT)", value=st.session_state.get("ent_confluence_token", ""),
+            type="password", key="ent_c_token",
+        )
+        c_space = st.text_input(
+            "Space key (optional)", value=st.session_state.get("ent_confluence_space", ""),
+            key="ent_c_space",
+        )
+        if st.button("Build Confluence index", key="ent_c_build"):
+            st.session_state["ent_confluence_url"] = c_url
+            st.session_state["ent_confluence_token"] = c_token
+            st.session_state["ent_confluence_space"] = c_space
+            os.environ["RAG_DEMO_CONFLUENCE_URL"] = c_url
+            os.environ["RAG_DEMO_CONFLUENCE_TOKEN"] = c_token
+            if c_space:
+                os.environ["RAG_DEMO_CONFLUENCE_SPACE"] = c_space
+            _build_enterprise_index("confluence")
+
+    # --- Jira ---
+    with st.expander("🎫 Jira", expanded=False):
+        j_url = st.text_input(
+            "URL", value=st.session_state.get("ent_jira_url", ""),
+            placeholder="https://your-domain.atlassian.net",
+            key="ent_j_url",
+        )
+        j_token = st.text_input(
+            "Token (PAT)", value=st.session_state.get("ent_jira_token", ""),
+            type="password", key="ent_j_token",
+        )
+        j_jql = st.text_input(
+            "JQL (optional)", value=st.session_state.get("ent_jira_jql", ""),
+            placeholder="updated >= -30d ORDER BY updated DESC",
+            key="ent_j_jql",
+        )
+        if st.button("Build Jira index", key="ent_j_build"):
+            st.session_state["ent_jira_url"] = j_url
+            st.session_state["ent_jira_token"] = j_token
+            st.session_state["ent_jira_jql"] = j_jql
+            os.environ["RAG_DEMO_JIRA_URL"] = j_url
+            os.environ["RAG_DEMO_JIRA_TOKEN"] = j_token
+            if j_jql:
+                os.environ["RAG_DEMO_JIRA_JQL"] = j_jql
+            _build_enterprise_index("jira")
+
+    # --- Outlook ---
+    with st.expander("📧 Outlook", expanded=False):
+        o_token = st.text_input(
+            "Graph API token", value=st.session_state.get("ent_outlook_token", ""),
+            type="password", key="ent_o_token",
+            help="OAuth2 bearer token for Microsoft Graph",
+        )
+        o_folder = st.text_input(
+            "Folder", value=st.session_state.get("ent_outlook_folder", "inbox"),
+            key="ent_o_folder",
+        )
+        if st.button("Build Outlook index", key="ent_o_build"):
+            st.session_state["ent_outlook_token"] = o_token
+            st.session_state["ent_outlook_folder"] = o_folder
+            os.environ["RAG_DEMO_OUTLOOK_TOKEN"] = o_token
+            os.environ["RAG_DEMO_OUTLOOK_FOLDER"] = o_folder
+            _build_enterprise_index("outlook")
+
+    # --- AWS S3 ---
+    with st.expander("☁️ AWS S3", expanded=False):
+        s3_bucket = st.text_input(
+            "Bucket", value=st.session_state.get("ent_s3_bucket", ""),
+            key="ent_s3_bucket",
+        )
+        s3_profile = st.text_input(
+            "Profile (for SSO/federation)", value=st.session_state.get("ent_s3_profile", ""),
+            placeholder="my-sso-profile",
+            help="AWS profile name. Run `aws sso login --profile NAME` first.",
+            key="ent_s3_profile",
+        )
+        s3_prefix = st.text_input(
+            "Prefix filter (optional)", value=st.session_state.get("ent_s3_prefix", ""),
+            key="ent_s3_prefix",
+        )
+        if st.button("Build S3 index", key="ent_s3_build"):
+            st.session_state["ent_s3_bucket"] = s3_bucket
+            st.session_state["ent_s3_profile"] = s3_profile
+            st.session_state["ent_s3_prefix"] = s3_prefix
+            os.environ["RAG_DEMO_AWS_S3_BUCKET"] = s3_bucket
+            if s3_profile:
+                os.environ["RAG_DEMO_AWS_PROFILE"] = s3_profile
+            if s3_prefix:
+                os.environ["RAG_DEMO_AWS_S3_PREFIX"] = s3_prefix
+            _build_enterprise_index("aws-s3")
+
+
+def _build_enterprise_index(source: str):
+    """Build the FAISS index for an enterprise source."""
+    from rag_demo.ingest import INDEX_DIRS
+    from rag_demo.config import get_settings
+    from rag_demo.sources import SOURCES
+    from rag_demo.ingest import build_index
+
+    settings = get_settings()
+    settings.index_dir = settings.index_dir.parent / INDEX_DIRS[source]
+    source_cls = SOURCES[source]
+    src = source_cls()
+
+    with st.spinner(f"Building {source} index..."):
+        try:
+            store = build_index(settings, src)
+            if store:
+                st.success(f"✅ Indexed {store.index.ntotal} chunks from {source}")
+                st.info(f"Select '{source}' in the Corpus dropdown to query it.")
+            else:
+                st.warning("No documents indexed.")
+        except Exception as e:
+            st.error(f"Failed: {e}")
+
+
 with st.sidebar:
     st.header("📚 Sidekick")
     corpus_options = [c for c in SOURCES if c in CORPUS_LABELS]
@@ -299,6 +426,13 @@ with st.sidebar:
             key="agentic-show-plan",
         )
         st.session_state["agentic_show_plan"] = show_plan
+
+    # Enterprise connectors: PAT/token configuration + index building.
+    # Tokens are kept in session state (in-memory only, cleared on restart).
+    with st.expander("🔌 Enterprise Connectors", expanded=False):
+        st.caption("⚠️ Tokens are stored in-memory only and cleared on restart. Never commit them.")
+        _enterprise_ui()
+
     upload_retriever = (
         st.session_state.get("upload_retriever") if corpus == "upload" else None
     )
@@ -736,6 +870,79 @@ question = st.session_state.pop("pending_question", None) or st.chat_input(
     "Ask anything…", disabled=not index_ok
 )
 reg_case = st.session_state.pop("pending_case", None)
+
+# Handle pending agentic plan approval (from previous rerun).
+# This must come before the `if question` block because clicking
+# Execute/Cancel triggers a rerun where `question` is None.
+agentic_pending = st.session_state.get("agentic_pending")
+if agentic_pending and index_ok:
+    from rag_demo.agent import agentic_ask, format_plan_as_ascii, format_plan_as_mermaid
+
+    pending_q = agentic_pending["question"]
+    pending_plan = agentic_pending["plan"]
+    # Display the user message (already in messages, just show plan UI).
+    with st.chat_message("assistant", avatar="📚"):
+        # If already approved (Execute was clicked), skip plan display and run.
+        if st.session_state.get("agentic_approved"):
+            st.session_state.pop("agentic_pending", None)
+            st.session_state.pop("agentic_approved", None)
+            with st.status("🤖 Running agent...", expanded=True) as status:
+                st.write("**Thought:** Plan approved, executing...")
+                try:
+                    answer = agentic_ask(
+                        pending_q, settings,
+                        verbose=False, show_plan=False,
+                    )
+                except Exception as e:
+                    status.update(label="❌ Failed", state="error")
+                    st.error(f"Agent failed: {e}")
+                    st.stop()
+                st.write(f"**Action:** Gathered evidence from {len(answer.sources)} sources")
+                st.write("**Observation:** Synthesizing answer...")
+                status.update(label="✅ Done", state="complete")
+
+            st.markdown(answer.text)
+            if answer.sources:
+                with st.expander("Sources"):
+                    for s in answer.sources:
+                        st.markdown(f"- {s}")
+            st.session_state.messages.append({
+                "role": "assistant", "text": answer.text,
+                "sources": answer.sources,
+            })
+            st.session_state.history.append((pending_q, answer.text))
+            st.stop()
+
+        # Not yet approved: show the plan with Execute/Cancel.
+        st.markdown("**🤖 Agent Plan:**")
+        # ASCII flowchart (always works, no JS dependency).
+        st.code(format_plan_as_ascii(pending_plan, pending_q))
+        # Mermaid (enhanced visual, may not render offline).
+        with st.expander("Flowchart (Mermaid)"):
+            mermaid = format_plan_as_mermaid(pending_plan, pending_q)
+            st.components.v1.html(
+                f"""
+                <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+                <div class="mermaid">{mermaid}</div>
+                <script>mermaid.initialize({{startOnLoad:true}});</script>
+                """,
+                height=300,
+            )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Execute", key="agentic_exec"):
+                st.session_state["agentic_approved"] = True
+                st.rerun()
+        with col2:
+            if st.button("❌ Cancel", key="agentic_cancel"):
+                st.session_state.pop("agentic_pending", None)
+                st.session_state.pop("agentic_approved", None)
+                st.info("Plan cancelled.")
+                st.stop()
+        st.info("Review the plan above, then click Execute.")
+        st.stop()
+
 if question and index_ok:
     # Regression runs use the case's canned history (e.g. the follow-up case).
     ask_history = (
@@ -753,14 +960,7 @@ if question and index_ok:
 
         # Agentic mode: ReAct loop with optional plan approval.
         if st.session_state.get("agentic_mode", False):
-            from rag_demo.agent import (
-                agentic_ask,
-                format_plan_as_ascii,
-                format_plan_as_mermaid,
-                _parse_thought,
-                THOUGHT_PROMPT,
-                TOOLS,
-            )
+            from rag_demo.agent import agentic_ask, _parse_thought, THOUGHT_PROMPT
             from rag_demo.chain import get_llm, strip_think
 
             thinking.markdown(
@@ -776,34 +976,16 @@ if question and index_ok:
                 plan = [{"tool": "search_docs", "query": question}]
             thinking.empty()
 
-            # Show plan for approval (if enabled).
+            # Store plan in session state and rerun to show approval UI.
+            # (The approval UI is handled in the agentic_pending block above,
+            #  which runs before this on the next rerun.)
             if st.session_state.get("agentic_show_plan", True):
-                st.markdown("**🤖 Agent Plan:**")
-                # Mermaid flowchart (renders in Streamlit via html component).
-                mermaid = format_plan_as_mermaid(plan, question)
-                st.components.v1.html(
-                    f"""
-                    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-                    <div class="mermaid">{mermaid}</div>
-                    <script>mermaid.initialize({{startOnLoad:true}});</script>
-                    """,
-                    height=300,
-                )
-                # ASCII fallback in expander.
-                with st.expander("Plan (text)"):
-                    st.code(format_plan_as_ascii(plan, question))
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    execute = st.button("✅ Execute", key=f"exec_{len(st.session_state.messages)}")
-                with col2:
-                    cancel = st.button("❌ Cancel", key=f"cancel_{len(st.session_state.messages)}")
-                if cancel:
-                    st.info("Plan cancelled.")
-                    st.stop()
-                if not execute:
-                    st.info("Review the plan above, then click Execute.")
-                    st.stop()
+                st.session_state["agentic_pending"] = {
+                    "question": question,
+                    "plan": plan,
+                }
+                st.rerun()
+            # If show_plan is off, execute directly (no approval).
 
             # Execute the agentic loop.
             with st.status("🤖 Running agent...", expanded=True) as status:
