@@ -212,6 +212,10 @@ evaluates evidence, and refines its approach — up to 4 iterations before synth
   extracts full page content from the top 2-3 URLs to get actual prices. Max 3
   extractions per run (configurable via `RAG_DEMO_MAX_EXTRACTS`). Also exposed as
   an MCP tool.
+- **Speed optimization** — set `RAG_DEMO_AGENT_MODEL` (e.g. `qwen3:8b`) to use a
+  faster model for planning, observation, and query-rewriting steps while keeping
+  the main model (`RAG_DEMO_MODEL`) for final answer synthesis. Cuts agentic
+  latency significantly on CPU.
 - **Structured deals output** — shopping questions get a table with product, retailer,
   prices, discount, status (announced/predicted/leaked/historical), and source.
 - **Tavily backend** — set `RAG_DEMO_TAVILY_API_KEY` (free tier: 1,000 searches/month
