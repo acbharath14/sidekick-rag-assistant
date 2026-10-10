@@ -58,11 +58,11 @@ def _search_web_tool(query: str, k: int = 5) -> str:
         )
         resp.raise_for_status()
     except requests.Timeout:
-        return "Web search failed: timeout after 15s (network slow or blocked)"
+        return "[TOOL_ERROR] Web search timed out after 15s (network slow or blocked)"
     except requests.ConnectionError as e:
-        return f"Web search failed: connection error ({e})"
+        return f"[TOOL_ERROR] Web search connection failed: {e}"
     except Exception as e:
-        return f"Web search failed: {e}"
+        return f"[TOOL_ERROR] Web search failed: {e}"
 
     class _Parser(HTMLParser):
         def __init__(self):
@@ -97,7 +97,7 @@ def _search_web_tool(query: str, k: int = 5) -> str:
     parser.feed(resp.text)
     results = parser.results[:k]
     if not results:
-        return "No web results found."
+        return "[NO_RESULTS] Web search returned no results for this query."
     return "\n\n".join(f"[{r['title']}]({r['url']})" for r in results)
 
 
@@ -114,15 +114,31 @@ searchable sub-questions and choose the right tool for each.
 Current date: {current_date}
 
 Available tools:
-- search_docs: Search the local document corpus (indexed docs, PDFs, etc.)
-- search_web: Search the web (current events, prices, deals, general knowledge)
+- search_docs: Search the local document corpus. The corpus contains ONLY \
+technical documentation (APIs, deployment guides, troubleshooting). Use this \
+ONLY if the question is about software, APIs, or technical documentation.
+- search_web: Search the web. Use this for EVERYTHING else: current events, \
+prices, deals, products, companies, people, news, shopping, reviews, \
+general knowledge, or any question not about the technical docs.
+
+RULES:
+- If the question mentions a retailer, product, deal, price, company, celebrity, \
+news event, or anything not in technical docs → use search_web.
+- If the question is about APIs, code, deployment, or technical troubleshooting \
+→ use search_docs.
+- When in doubt, use search_web. The local corpus is very narrow.
+
+Examples:
+- "Walmart Black Friday deals" → search_web (retail, not tech docs)
+- "How do I create a shipment via API?" → search_docs (API question)
+- "What is the capital of France?" → search_web (general knowledge)
+- "API token expiry" → search_docs (technical)
 
 User question: {question}
 
 Reply with JSON: a list of objects like \
 [{{"tool": "search_docs", "query": "..."}}, {{"tool": "search_web", "query": "..."}}]
-Use 1-3 tool calls. Prefer search_docs for questions about the indexed corpus; \
-search_web for anything requiring current/external information.
+Use 1-3 tool calls.
 
 JSON:"""
 
@@ -136,9 +152,20 @@ User question: {question}
 Evidence:
 {evidence}
 
+IMPORTANT - Tool status markers:
+- [TOOL_ERROR]: The search tool itself failed (network, timeout, blocked). \
+This is NOT evidence that no information exists. Do NOT conclude "doesn't exist" \
+from a tool error. Instead, note the tool failure in gaps and suggest retrying \
+or trying a different query.
+- [NO_RESULTS]: The search completed but found nothing. This suggests the \
+information may not exist, but try 1-2 alternative phrasings before concluding.
+
 Reply with JSON: {{"sufficient": true/false, "gaps": ["what's still missing"], \
-"refined_queries": [{{"tool": "search_docs"|"search_web", "query": "..."}}]}}
+"refined_queries": [{{"tool": "search_docs"|"search_web", "query": "..."}}], \
+"tool_errors": ["describe any tool failures separately"]}}
 Use search_web for gaps needing current/external info, search_docs for corpus gaps.
+If evidence contains [TOOL_ERROR], ALWAYS set sufficient=false and explain the \
+tool failure in gaps — never claim the information doesn't exist.
 
 JSON:"""
 
@@ -151,6 +178,10 @@ User question: {question}
 
 Evidence:
 {evidence}
+
+IMPORTANT: If the evidence contains [TOOL_ERROR] markers, do NOT claim the \
+information doesn't exist. Instead, say: "I couldn't retrieve [X] because the \
+search tool failed: [reason]." Be honest about tool limitations.
 
 Answer concisely with citations:"""
 
@@ -298,13 +329,27 @@ def agentic_ask(
     # ---- THOUGHT: plan tool calls ----
     from datetime import date
     current_date = date.today().isoformat()
-    _progress("thought", "Planning search strategy...")
-    thought_text = _invoke(THOUGHT_PROMPT.format(
-        question=question, current_date=current_date
-    ))
-    plan = _parse_thought(thought_text)
-    if not plan:
-        plan = [{"tool": "search_docs", "query": question}]
+
+    # Fast path: obvious web queries skip the LLM planning call.
+    # Saves 20-30s on CPU by going straight to search_web.
+    _web_keywords = {
+        "black friday", "deals", "deal ", "price", "walmart", "amazon",
+        "target", "best buy", "costco", "sale", "discount", "coupon",
+        "news", "weather", "stock price", "election", "president",
+        "celebrity", "movie", "sports", "game score",
+    }
+    _q_lower = question.lower()
+    if any(kw in _q_lower for kw in _web_keywords):
+        _progress("thought", "Fast path: web query detected, skipping LLM planning")
+        plan = [{"tool": "search_web", "query": question}]
+    else:
+        _progress("thought", "Planning search strategy...")
+        thought_text = _invoke(THOUGHT_PROMPT.format(
+            question=question, current_date=current_date
+        ))
+        plan = _parse_thought(thought_text)
+        if not plan:
+            plan = [{"tool": "search_docs", "query": question}]
     _progress("thought", f"Plan: {len(plan)} tool calls")
 
     # ---- Show plan and get approval (if requested) ----

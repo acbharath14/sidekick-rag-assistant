@@ -426,6 +426,30 @@ with st.sidebar:
             key="agentic-show-plan",
         )
         st.session_state["agentic_show_plan"] = show_plan
+        # Web search diagnostic.
+        if st.button("🌐 Test web search", key="test_web_search",
+                     help="Check if DuckDuckGo is reachable from this machine"):
+            with st.spinner("Testing..."):
+                import requests
+                try:
+                    resp = requests.post(
+                        "https://html.duckduckgo.com/html/",
+                        data={"q": "test"},
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200 and "result__a" in resp.text:
+                        st.success("✅ Web search working")
+                    elif resp.status_code == 200:
+                        st.warning("⚠️ Reached DuckDuckGo but no results parsed (HTML changed?)")
+                    else:
+                        st.error(f"❌ HTTP {resp.status_code}")
+                except requests.Timeout:
+                    st.error("❌ Timeout — network slow or DuckDuckGo blocked")
+                except requests.ConnectionError as e:
+                    st.error(f"❌ Connection failed: {e}")
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
 
     # Enterprise connectors: PAT/token configuration + index building.
     # Tokens are kept in session state (in-memory only, cleared on restart).
