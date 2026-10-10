@@ -966,8 +966,11 @@ if question and index_ok:
                 unsafe_allow_html=True,
             )
             # THOUGHT: generate plan.
+            from datetime import date
             llm = get_llm(settings)
-            out = llm.invoke(THOUGHT_PROMPT.format(question=question))
+            out = llm.invoke(THOUGHT_PROMPT.format(
+                question=question, current_date=date.today().isoformat()
+            ))
             thought_text = out.content if hasattr(out, "content") else str(out)
             plan = _parse_thought(strip_think(thought_text.strip()))
             if not plan:

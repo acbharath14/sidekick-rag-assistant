@@ -57,6 +57,10 @@ def _search_web_tool(query: str, k: int = 5) -> str:
             headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
         )
         resp.raise_for_status()
+    except requests.Timeout:
+        return "Web search failed: timeout after 15s (network slow or blocked)"
+    except requests.ConnectionError as e:
+        return f"Web search failed: connection error ({e})"
     except Exception as e:
         return f"Web search failed: {e}"
 
@@ -107,6 +111,8 @@ TOOLS = {
 THOUGHT_PROMPT = """You are a research planner. Break the user's question into \
 searchable sub-questions and choose the right tool for each.
 
+Current date: {current_date}
+
 Available tools:
 - search_docs: Search the local document corpus (indexed docs, PDFs, etc.)
 - search_web: Search the web (current events, prices, deals, general knowledge)
@@ -123,6 +129,8 @@ JSON:"""
 OBSERVATION_PROMPT = """You are evaluating retrieved evidence. Given the user's question and \
 the evidence gathered so far, decide if the question can be answered.
 
+Current date: {current_date}
+
 User question: {question}
 
 Evidence:
@@ -136,6 +144,8 @@ JSON:"""
 
 SYNTHESIZE_PROMPT = """Answer the user's question using ONLY the evidence below. \
 Cite sources with [filename] markers.
+
+Current date: {current_date}
 
 User question: {question}
 
@@ -286,8 +296,12 @@ def agentic_ask(
         return strip_think(text.strip())
 
     # ---- THOUGHT: plan tool calls ----
+    from datetime import date
+    current_date = date.today().isoformat()
     _progress("thought", "Planning search strategy...")
-    thought_text = _invoke(THOUGHT_PROMPT.format(question=question))
+    thought_text = _invoke(THOUGHT_PROMPT.format(
+        question=question, current_date=current_date
+    ))
     plan = _parse_thought(thought_text)
     if not plan:
         plan = [{"tool": "search_docs", "query": question}]
@@ -362,7 +376,8 @@ def agentic_ask(
         _progress("observation", "Evaluating if evidence is sufficient...")
         evidence_text = "\n\n".join(all_evidence)
         obs_text = _invoke(OBSERVATION_PROMPT.format(
-            question=question, evidence=evidence_text
+            question=question, evidence=evidence_text,
+            current_date=current_date
         ))
         verdict = _parse_verify(obs_text)
         _progress(
@@ -396,7 +411,8 @@ def agentic_ask(
     _progress("synthesize", "Synthesizing final answer from all evidence...")
     evidence_text = "\n\n".join(all_evidence)
     answer_text = _invoke(SYNTHESIZE_PROMPT.format(
-        question=question, evidence=evidence_text
+        question=question, evidence=evidence_text,
+        current_date=current_date
     ))
     _progress("synthesize", "Done.")
 
