@@ -426,6 +426,18 @@ with st.sidebar:
             key="agentic-show-plan",
         )
         st.session_state["agentic_show_plan"] = show_plan
+        # Tavily API key for reliable web search.
+        tavily_key = st.text_input(
+            "Tavily API key",
+            value=st.session_state.get("tavily_key", ""),
+            type="password",
+            help="Get a free key at tavily.com (1,000 searches/month). Enables reliable web search.",
+            key="tavily_key_input",
+        )
+        if tavily_key:
+            import os
+            os.environ["RAG_DEMO_TAVILY_API_KEY"] = tavily_key
+            st.session_state["tavily_key"] = tavily_key
         # Web search diagnostic.
         if st.button("🌐 Test web search", key="test_web_search",
                      help="Check if DuckDuckGo is reachable from this machine"):
