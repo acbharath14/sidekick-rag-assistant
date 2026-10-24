@@ -69,9 +69,12 @@ class Retriever:
         settings: Settings | None = None,
         store=None,
         chunks: list[dict] | None = None,
+        embeddings=None,
     ):
         """store/chunks: inject a pre-built index (e.g. an in-memory upload
-        index) instead of loading from settings.index_dir."""
+        index) instead of loading from settings.index_dir.
+        embeddings: inject a shared embeddings object (see caching.py);
+        when omitted, one is built via get_embeddings (old behavior)."""
         self.settings = settings or get_settings()
         if store is not None:
             self.store = store
@@ -83,7 +86,7 @@ class Retriever:
                 )
             self.store = FAISS.load_local(
                 str(self.settings.index_dir),
-                get_embeddings(self.settings),
+                embeddings if embeddings is not None else get_embeddings(self.settings),
                 allow_dangerous_deserialization=True,
             )
             self.chunks = self._load_chunks()

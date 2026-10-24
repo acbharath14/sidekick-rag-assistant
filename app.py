@@ -382,6 +382,13 @@ def _build_enterprise_index(source: str):
         try:
             store = build_index(settings, src)
             if store:
+                # Phase 1 (S1): a rebuild in place must not leave the
+                # cached retriever serving the old index (see caching.py
+                # invalidation contract). Only on success — a failed
+                # build leaves the on-disk index (and cache) untouched.
+                from rag_demo.caching import clear_cache
+
+                clear_cache()
                 st.success(f"✅ Indexed {store.index.ntotal} chunks from {source}")
                 st.info(f"Select '{source}' in the Corpus dropdown to query it.")
             else:
@@ -792,6 +799,20 @@ if "active_chat_id" not in st.session_state:
 
 index_ok = settings.index_dir.exists() or upload_retriever is not None
 
+# Phase 1 (S1): one cached retriever for the default-corpus path. The
+# upload retriever is session-specific and bypasses the cache by design.
+# Guarded: if cached construction fails (e.g. hybrid mode without
+# chunks.json), fall back to per-question construction so the failure
+# surfaces at ask time exactly as before, instead of crashing the render.
+active_retriever = upload_retriever
+if active_retriever is None and index_ok:
+    try:
+        from rag_demo.caching import get_cached_retriever
+
+        active_retriever = get_cached_retriever(settings)
+    except Exception:
+        active_retriever = None
+
 # ------------------------------------------------------- regression run-all ---
 if st.session_state.pop("reg_run_all", False) and index_ok:
     _cases = _load_regression_cases()
@@ -804,7 +825,7 @@ if st.session_state.pop("reg_run_all", False) and index_ok:
                 settings,
                 history=[tuple(h) for h in _case.get("history", [])],
                 user_groups=groups,
-                retriever=upload_retriever,
+                retriever=active_retriever,
             )
             _checks = check_case(_case, _ans, real_llm=not settings.fake)
             _results.append(
@@ -975,6 +996,7 @@ if agentic_pending and index_ok:
                         verbose=False, show_plan=False,
                         on_progress=_on_progress,
                         history=st.session_state.get("history", []),
+                        retriever=active_retriever,
                     )
                 except Exception as e:
                     status.update(label="❌ Failed", state="error")
@@ -1073,6 +1095,7 @@ if question and index_ok:
                     question, settings,
                     verbose=False, show_plan=False,
                     history=st.session_state.get("history", []),
+                    retriever=active_retriever,
                 )
                 st.write(f"**Action:** Executed {len(answer.sources)} tool calls")
                 st.write("**Observation:** Synthesizing answer...")
@@ -1102,7 +1125,7 @@ if question and index_ok:
                     settings,
                     history=ask_history,
                     user_groups=groups,
-                    retriever=upload_retriever,
+                    retriever=active_retriever,
                 ):
                     if "token" in event:
                         if first_token:

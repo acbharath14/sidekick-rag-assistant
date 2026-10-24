@@ -32,10 +32,20 @@ from .retriever import Retriever
 MAX_ITERATIONS = 4
 
 
-def _search_docs_tool(query: str, k: int = 4, settings: Settings | None = None) -> str:
-    """Tool: search the corpus. Returns formatted passages."""
+def _search_docs_tool(
+    query: str,
+    k: int = 4,
+    settings: Settings | None = None,
+    retriever: Retriever | None = None,
+) -> str:
+    """Tool: search the corpus. Returns formatted passages.
+
+    retriever: inject a shared Retriever (see caching.py). When omitted,
+    one is constructed per call (old behavior — the Streamlit app passes
+    the cached retriever so tool calls stop rebuilding it).
+    """
     settings = settings or get_settings()
-    retriever = Retriever(settings)
+    retriever = retriever or Retriever(settings)
     hits = retriever.search(query, k=k)
     if not hits:
         return "No matching passages found."
@@ -362,6 +372,7 @@ def agentic_ask(
     show_plan: bool = False,
     on_progress: object = None,
     history: list[tuple[str, str]] | None = None,
+    retriever: Retriever | None = None,
 ) -> Answer:
     """Run the ReAct loop (Thought → Action → Observation).
 
@@ -374,6 +385,10 @@ def agentic_ask(
     history: optional list of (question, answer) tuples for follow-up context.
         Follow-ups like "what about Target?" are rewritten to standalone
         questions using this history.
+
+    retriever: inject a shared Retriever for search_docs tool calls (see
+        caching.py). When omitted, _search_docs_tool constructs one per
+        call (old behavior).
 
     Returns an Answer with sources from all tool calls.
     """
@@ -533,7 +548,7 @@ def agentic_ask(
     def _dispatch(tool: str, query: str) -> str:
         if tool == "search_web":
             return _search_web_tool(query)
-        return _search_docs_tool(query, settings=settings)
+        return _search_docs_tool(query, settings=settings, retriever=retriever)
 
     while iteration < max_iterations:
         iteration += 1
