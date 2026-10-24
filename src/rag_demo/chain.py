@@ -252,9 +252,9 @@ def ask(
     # to history. This enables long-term recall across sessions.
     episodic_used = False
     try:
-        from .episodic import EpisodicMemory
+        from .caching import get_cached_episodic_memory
 
-        _episodic = EpisodicMemory(settings)
+        _episodic = get_cached_episodic_memory(settings)
         _episodes = _episodic.search(question, k=3)
         if _episodes:
             # Prepend as (question, answer) tuples, oldest first.
@@ -294,9 +294,9 @@ def ask(
     # to avoid polluting memory with "I don't know" responses).
     if answer.grounded:
         try:
-            from .episodic import EpisodicMemory
+            from .caching import get_cached_episodic_memory
 
-            EpisodicMemory(settings).add(question, text)
+            get_cached_episodic_memory(settings).add(question, text)
         except Exception:
             pass
     return answer
@@ -333,9 +333,9 @@ def stream_ask(
         return
     # Episodic memory: retrieve relevant past conversations.
     try:
-        from .episodic import EpisodicMemory
+        from .caching import get_cached_episodic_memory
 
-        _episodic = EpisodicMemory(settings)
+        _episodic = get_cached_episodic_memory(settings)
         _episodes = _episodic.search(question, k=3)
         if _episodes:
             _ep_history = [(e["question"], e["answer"]) for e in reversed(_episodes)]
@@ -423,9 +423,9 @@ def stream_ask(
     # Save to episodic memory (skip ungrounded fallbacks).
     if answer.grounded:
         try:
-            from .episodic import EpisodicMemory
+            from .caching import get_cached_episodic_memory
 
-            EpisodicMemory(settings).add(question, text)
+            get_cached_episodic_memory(settings).add(question, text)
         except Exception:
             pass
     yield {"answer": answer}

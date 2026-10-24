@@ -677,3 +677,138 @@ def test_ocr_pdf_helpful_error_without_backend(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytesseract", None)
     with pytest.raises(RuntimeError, match="tesseract and poppler"):
         ocr_pdf(b"not a real pdf")
+
+
+# --- Phase 1 (S1): cached models/indexes ---------------------------------
+# The counting factory stands in for the real embeddings constructor:
+# every construction is counted, so these tests prove single construction
+# across repeated questions instead of merely asserting object identity.
+
+
+def _counting_embeddings(monkeypatch):
+    """Patch rag_demo.caching.get_embeddings with a counting fake factory.
+
+    Returns (calls, factory) where calls is a one-element list holding the
+    construction count. Only the caching module's reference is patched;
+    ingest (which builds the fixture index) keeps the real fake path.
+    """
+    from langchain_core.embeddings import FakeEmbeddings
+
+    calls = [0]
+
+    def factory(settings):
+        calls[0] += 1
+        return FakeEmbeddings(size=384)
+
+    monkeypatch.setattr("rag_demo.caching.get_embeddings", factory)
+    monkeypatch.delenv("RAG_DEMO_NO_CACHE", raising=False)
+    return calls
+
+
+def test_cached_retriever_constructed_once_across_two_questions(
+    _indexed, monkeypatch
+):
+    """Phase 1 core: embeddings built once across two ask() calls that
+    share the cached retriever (plus episodic reuse adds no construction)."""
+    from rag_demo.caching import (
+        clear_cache,
+        get_cached_episodic_memory,
+        get_cached_retriever,
+    )
+    from rag_demo.chain import ask
+
+    calls = _counting_embeddings(monkeypatch)
+    clear_cache()
+
+    retriever = get_cached_retriever(_indexed)
+    assert calls[0] == 1, "expected one embeddings construction for the retriever"
+
+    # Episodic memory reuses the cached embeddings object — no new build.
+    memory = get_cached_episodic_memory(_indexed)
+    assert get_cached_episodic_memory(_indexed) is memory
+    assert calls[0] == 1, "episodic memory must reuse the cached embeddings"
+
+    # Two questions through the same cached retriever: still one build.
+    ans1 = ask("What is the max parcel weight?", _indexed, retriever=retriever)
+    ans2 = ask("How long are API tokens valid?", _indexed, retriever=retriever)
+    assert ans1.text and ans2.text
+    assert calls[0] == 1, "embeddings must be constructed once across questions"
+
+
+def test_cached_retriever_same_settings_returns_same_object(
+    _indexed, monkeypatch
+):
+    from rag_demo.caching import clear_cache, get_cached_retriever
+
+    _counting_embeddings(monkeypatch)
+    clear_cache()
+
+    first = get_cached_retriever(_indexed)
+    second = get_cached_retriever(_indexed)
+    assert first is second
+
+
+def test_cached_retriever_cleared_by_clear_cache(_indexed, monkeypatch):
+    from rag_demo.caching import clear_cache, get_cached_retriever
+
+    calls = _counting_embeddings(monkeypatch)
+    clear_cache()
+
+    first = get_cached_retriever(_indexed)
+    clear_cache()
+    second = get_cached_retriever(_indexed)
+    assert first is not second
+    assert calls[0] == 2
+
+
+def test_no_cache_bypass_constructs_fresh_each_time(_indexed, monkeypatch):
+    from rag_demo.caching import clear_cache, get_cached_retriever
+
+    calls = _counting_embeddings(monkeypatch)
+    monkeypatch.setenv("RAG_DEMO_NO_CACHE", "1")
+    clear_cache()
+
+    first = get_cached_retriever(_indexed)
+    second = get_cached_retriever(_indexed)
+    assert first is not second
+    assert calls[0] == 2, "NO_CACHE must bypass the cache entirely"
+
+
+def test_cache_key_separates_embedding_model(_indexed, monkeypatch):
+    import dataclasses
+
+    from rag_demo.caching import clear_cache, get_cached_retriever
+
+    calls = _counting_embeddings(monkeypatch)
+    clear_cache()
+
+    base = get_cached_retriever(_indexed)
+    assert calls[0] == 1
+
+    # Same settings again: cached, no new construction.
+    assert get_cached_retriever(_indexed) is base
+    assert calls[0] == 1
+
+    # Different embedding model: a different key, so a fresh construction.
+    other = dataclasses.replace(_indexed, embedding_model="other-model")
+    assert get_cached_retriever(other) is not base
+    assert calls[0] == 2
+
+
+def test_search_docs_tool_accepts_injected_retriever():
+    from rag_demo.agent import _search_docs_tool
+    from rag_demo.retriever import Hit
+
+    class StubRetriever:
+        def search(self, query, k=None):
+            return [Hit(text="injected passage", source="stub.md", score=0.1)]
+
+    out = _search_docs_tool("anything", retriever=StubRetriever())
+    assert "injected passage" in out and "[stub.md]" in out
+
+
+def test_search_docs_tool_default_path_constructs_retriever(_indexed):
+    from rag_demo.agent import _search_docs_tool
+
+    out = _search_docs_tool("API token expiry", settings=_indexed)
+    assert isinstance(out, str) and out

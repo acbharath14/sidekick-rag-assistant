@@ -40,12 +40,16 @@ def _is_enabled() -> bool:
 class EpisodicMemory:
     """Persistent LanceDB table of past conversations."""
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, embeddings=None):
+        """embeddings: inject a shared embeddings object (see caching.py);
+        when omitted, one is built via get_embeddings (old behavior)."""
         self.settings = settings or get_settings()
         self.dir = _episodic_dir(self.settings)
         self._db = None
         self._table = None
         self._embeddings = None
+        self._embeddings_arg = embeddings
+        self._needs_reconnect = False
         if _is_enabled():
             self._connect()
 
@@ -57,7 +61,11 @@ class EpisodicMemory:
 
             self.dir.mkdir(parents=True, exist_ok=True)
             self._db = lancedb.connect(str(self.dir))
-            self._embeddings = get_embeddings(self.settings)
+            self._embeddings = (
+                self._embeddings_arg
+                if self._embeddings_arg is not None
+                else get_embeddings(self.settings)
+            )
 
             # Define schema: vector + metadata in one table.
             schema = pa.schema([
@@ -87,9 +95,23 @@ class EpisodicMemory:
         except Exception:
             return []
 
+    def _reconnect_if_cleared(self) -> None:
+        """Reconnect once after clear() wiped the table (singleton reuse).
+
+        Without this, a cached singleton would stay dead after clear()
+        where a fresh instance would rebuild. The flag is consumed on
+        first use so a broken backend is not retried on every call.
+        """
+        if self._needs_reconnect:
+            self._needs_reconnect = False
+            self._connect()
+
     def add(self, question: str, answer: str) -> None:
         """Store a Q&A pair in episodic memory."""
-        if not _is_enabled() or self._table is None:
+        if not _is_enabled():
+            return
+        self._reconnect_if_cleared()
+        if self._table is None:
             return
         if not question.strip() or not answer.strip():
             return
@@ -120,7 +142,10 @@ class EpisodicMemory:
 
         Returns list of {"question": str, "answer": str, "ts": str}.
         """
-        if not _is_enabled() or self._table is None:
+        if not _is_enabled():
+            return []
+        self._reconnect_if_cleared()
+        if self._table is None:
             return []
         if not query.strip() or len(query.strip()) < 3:
             return []
@@ -161,5 +186,8 @@ class EpisodicMemory:
                 shutil.rmtree(self.dir)
             self._db = None
             self._table = None
+            # Singleton reuse: next search/add rebuilds the table instead
+            # of staying dead (see _reconnect_if_cleared).
+            self._needs_reconnect = True
         except OSError:
             pass
