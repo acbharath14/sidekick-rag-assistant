@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
-from .config import Settings, get_embeddings, get_settings
+from .config import INDEX_FORMAT_VERSION, Settings, get_embeddings, get_settings
 
 try:
     from rank_bm25 import BM25Okapi
@@ -38,6 +38,90 @@ class Hit:
     source: str
     score: float
     allowed_groups: tuple = ("*",)
+    # Phase 5 (A2+A3) grounding fields. `source` stays the bare filename
+    # (evals compare on it); `section` + `chunk_id` are the passage-level
+    # identity. `dense_score` is the FAISS L2 distance when the hit came
+    # from dense search (None for BM25-only hits). `confidence` is set by
+    # apply_floor: a 0-1 absolute relevance signal, or None when no
+    # absolute signal exists for the hit.
+    chunk_id: str = ""
+    section: str = ""
+    dense_score: float | None = None
+    confidence: float | None = None
+
+
+def format_citation(hit: Hit) -> str:
+    """Passage-level citation: source + section, not filename alone."""
+    return f"{hit.source} › {hit.section}" if hit.section else hit.source
+
+
+def citation_source(citation: str) -> str:
+    """Filename part of a citation (before the section separator)."""
+    return citation.split(" › ", 1)[0]
+
+
+def confidence_band(confidence: float | None) -> str:
+    """Qualitative band for UI display; raw scores are debug-only."""
+    if confidence is None:
+        return "—"
+    if confidence >= 0.75:
+        return "High"
+    if confidence >= 0.5:
+        return "Medium"
+    return "Low"
+
+
+def confidence_for(hit: Hit, score_kind: str) -> float | None:
+    """Map a hit's final score to a 0-1 absolute confidence.
+
+    score_kind is the stage that produced the final ranking:
+    - "rerank": cross-encoder logit; sigmoid maps logit 0 -> 0.5.
+    - "dense": FAISS L2 distance on (near-)normalized embeddings, where
+      distance 0 -> 1.0 and distance 2 -> 0.0.
+    - "rrf": deliberately unsupported. RRF scores are purely relative
+      ranks within one query's candidate pool — a garbage query still
+      produces ranked hits — so they carry no absolute relevance signal
+      and must never feed a floor. Hybrid hits without reranking fall
+      back to their dense distance when they have one (see apply_floor).
+    """
+    import math
+
+    if score_kind == "rerank":
+        return 1.0 / (1.0 + math.exp(-hit.score))
+    if score_kind == "dense":
+        if hit.dense_score is None:
+            return None
+        return max(0.0, min(1.0, 1.0 - hit.dense_score / 2.0))
+    return None
+
+
+def apply_floor(
+    hits: list[Hit], floor: float, score_kind: str
+) -> tuple[list[Hit], int]:
+    """Drop hits below the relevance floor; return (kept, dropped_count).
+
+    The floor needs an absolute signal, in priority order: the rerank
+    logit when reranked, else the dense L2 distance when the hit has
+    one. A hit with no absolute signal (e.g. a BM25-only hit when
+    reranking is off) cannot be judged and is kept — dropping it on a
+    meaningless number would be worse than keeping it. floor <= 0
+    disables filtering but still stamps confidence for display.
+    """
+    kept: list[Hit] = []
+    dropped = 0
+    for hit in hits:
+        if score_kind == "rerank":
+            conf = confidence_for(hit, "rerank")
+        elif hit.dense_score is not None:
+            conf = confidence_for(hit, "dense")
+        else:
+            conf = None
+        hit.confidence = conf
+        if floor > 0 and conf is not None and conf < floor:
+            dropped += 1
+        else:
+            kept.append(hit)
+    return kept, dropped
 
 
 def rrf_fuse(rankings: list[list[Hit]], k: int, rrf_k: int = RRF_K) -> list[Hit]:
@@ -56,11 +140,40 @@ def rrf_fuse(rankings: list[list[Hit]], k: int, rrf_k: int = RRF_K) -> list[Hit]
                 entry = [hit, 0.0]
                 fused[key] = entry
             entry[1] += 1.0 / (rrf_k + rank)
+            # Keep the dense distance for the floor: a fused hit that
+            # came from dense search carries an absolute signal even
+            # though its fused RRF score is purely relative. Replace,
+            # don't mutate — the input rankings belong to the caller.
+            if hit.dense_score is not None and entry[0].dense_score is None:
+                from dataclasses import replace
+
+                entry[0] = replace(entry[0], dense_score=hit.dense_score)
     scored = sorted(fused.values(), key=lambda e: e[1], reverse=True)
     return [
-        Hit(text=h.text, source=h.source, score=s, allowed_groups=h.allowed_groups)
+        Hit(
+            text=h.text,
+            source=h.source,
+            score=s,
+            allowed_groups=h.allowed_groups,
+            chunk_id=h.chunk_id,
+            section=h.section,
+            dense_score=h.dense_score,
+        )
         for h, s in scored[:k]
     ]
+
+
+def _index_format_current(index_dir) -> bool:
+    """True when the on-disk index carries Phase 5 chunk metadata."""
+    from pathlib import Path
+
+    marker = Path(index_dir) / "index_format.json"
+    if not marker.exists():
+        return False
+    try:
+        return json.loads(marker.read_text(encoding="utf-8")).get("version") == INDEX_FORMAT_VERSION
+    except (OSError, ValueError):
+        return False
 
 
 class Retriever:
@@ -90,6 +203,14 @@ class Retriever:
                 allow_dangerous_deserialization=True,
             )
             self.chunks = self._load_chunks()
+        # Phase 5 (A2+A3): an index built before chunk-level citations
+        # lacks chunk_id/section metadata. It still answers, but citations
+        # degrade to filename-only — so flag it instead of silently
+        # dropping the new fields. Injected stores/chunks (uploads,
+        # tests) carry no on-disk format and are never stale.
+        self.index_stale = False
+        if store is None:
+            self.index_stale = not _index_format_current(self.settings.index_dir)
         self.bm25 = None
         if self.settings.retrieval == "hybrid":
             if BM25Okapi is None:
@@ -103,6 +224,9 @@ class Retriever:
                 )
             self.bm25 = BM25Okapi([_tokenize(c['text']) for c in self.chunks])
         self._reranker = None
+        # Phase 5 floor bookkeeping, updated by every search() call.
+        self.last_candidates = 0
+        self.last_floor_dropped = 0
 
     def _load_chunks(self) -> list[dict]:
         p = self.settings.index_dir / "chunks.json"
@@ -118,6 +242,9 @@ class Retriever:
                 source=d.metadata.get("source", "?"),
                 score=float(s),
                 allowed_groups=tuple(d.metadata.get("allowed_groups", ["*"])),
+                chunk_id=d.metadata.get("chunk_id", ""),
+                section=d.metadata.get("section", ""),
+                dense_score=float(s),
             )
             for d, s in results
         ]
@@ -131,6 +258,8 @@ class Retriever:
                 source=self.chunks[i]["source"],
                 score=float(scores[i]),
                 allowed_groups=tuple(self.chunks[i].get("allowed_groups", ["*"])),
+                chunk_id=self.chunks[i].get("chunk_id", ""),
+                section=self.chunks[i].get("section", ""),
             )
             for i in top
         ]
@@ -173,8 +302,25 @@ class Retriever:
             for h in hits
             if "*" in h.allowed_groups or groups & set(h.allowed_groups)
         ]
-        if rerank:
-            hits = self._maybe_rerank(query, hits, k)
+        # Phase 5 (A2+A3) relevance floor. The floor runs on the full
+        # candidate pool BEFORE trimming to k, so a passing hit beyond
+        # the first k is not lost to a failing one. The score kind is
+        # the stage that produced the final ranking: rerank logits when
+        # reranked, else the dense distance carried on each hit (RRF
+        # scores themselves are never floored — see confidence_for).
+        # last_floor_dropped / last_candidates let callers (chain) tell
+        # "nothing passed the floor" apart from "nothing was retrieved".
+        score_kind = "dense"
+        if rerank and hits:
+            # Rank the whole pool, then floor, then trim — rerank() takes
+            # top_k, so pass the pool size to keep every candidate.
+            # Skipped on empty pools so no model is loaded for nothing.
+            hits = self._maybe_rerank(query, hits, len(hits))
+            score_kind = "rerank"
+        pre_floor = len(hits)
+        hits, dropped = apply_floor(hits, self.settings.relevance_floor, score_kind)
+        self.last_candidates = pre_floor
+        self.last_floor_dropped = dropped
         return hits[:k]
 
     def as_langchain_retriever(self, k: int | None = None):

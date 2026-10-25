@@ -28,7 +28,7 @@ from .chain import (
     strip_think,
 )
 from .config import Settings, get_settings
-from .retriever import Retriever
+from .retriever import Hit, Retriever, format_citation
 
 
 MAX_ITERATIONS = 4
@@ -64,13 +64,53 @@ def _dispatch_plan(plan, dispatch):
         return list(ex.map(lambda s: dispatch(s["tool"], s["query"]), plan))
 
 
-def _search_docs_tool(
+class StepResult:
+    """One executed plan step (Phase 5, A2+A3): the evidence text for
+    synthesis plus, for corpus steps, the Hit objects behind it — so
+    sources are built from the retrieval result, not scraped from text."""
+
+    def __init__(self, text: str, hits: list[Hit] | None):
+        self.text = text
+        self.hits = hits
+
+
+def _execute_plan(plan, settings, retriever) -> list[StepResult]:
+    """Run a plan like _dispatch_plan (concurrent, plan order kept,
+    single-step inline) but return StepResults carrying corpus Hits.
+    Web steps carry hits=None; their sources come from web_sources()."""
+    if not plan:
+        return []
+
+    def run(step):
+        if step["tool"] == "search_web":
+            return StepResult(text=_search_web_tool(step["query"]), hits=None)
+        hits = _search_docs_hits(
+            step["query"], settings=settings, retriever=retriever
+        )
+        return StepResult(text=format_docs_evidence(hits), hits=hits)
+
+    if len(plan) == 1:
+        return [run(plan[0])]
+    with ThreadPoolExecutor(max_workers=min(len(plan), 4)) as ex:
+        return list(ex.map(run, plan))
+
+
+def sources_from_step(step: dict, result: StepResult) -> list[str]:
+    """Structural sources for one executed step (Phase 5, A2+A3)."""
+    if result.hits is not None:
+        return [format_citation(h) for h in result.hits]
+    return web_sources(result.text)
+
+
+def _search_docs_hits(
     query: str,
     k: int = 4,
     settings: Settings | None = None,
     retriever: Retriever | None = None,
-) -> str:
-    """Tool: search the corpus. Returns formatted passages.
+) -> list[Hit]:
+    """Corpus search returning Hit objects (Phase 5, A2+A3): the agent
+    loop cites these structurally instead of regex-scraping bracketed
+    tokens out of tool text.
 
     retriever: inject a shared Retriever (see caching.py). When omitted,
     one is constructed per call (old behavior — the Streamlit app passes
@@ -78,12 +118,38 @@ def _search_docs_tool(
     """
     settings = settings or get_settings()
     retriever = retriever or Retriever(settings)
-    hits = retriever.search(query, k=k)
+    return retriever.search(query, k=k)
+
+
+def format_docs_evidence(hits: list[Hit]) -> str:
+    """Evidence text for the synthesis prompt, with passage-level
+    citations (source + section) the model can copy into its answer."""
     if not hits:
         return "No matching passages found."
-    return "\n\n".join(
-        f"[{h.source}]\n{h.text}" for h in hits
+    return "\n\n".join(f"[{format_citation(h)}]\n{h.text}" for h in hits)
+
+
+def _search_docs_tool(
+    query: str,
+    k: int = 4,
+    settings: Settings | None = None,
+    retriever: Retriever | None = None,
+) -> str:
+    """Tool: search the corpus. Returns formatted passages."""
+    return format_docs_evidence(
+        _search_docs_hits(query, k=k, settings=settings, retriever=retriever)
     )
+
+
+def web_sources(text: str) -> list[str]:
+    """Source titles from web tool output, parsed structurally.
+
+    Web results are formatted as markdown links, [title](url). Only
+    link titles are sources — bare bracketed markers ([TOOL_ERROR],
+    [NO_RESULTS], [CACHED …]) have no (url) and are excluded by
+    construction, which is exactly what the old regex scrape got wrong.
+    """
+    return [m.group(1) for m in re.finditer(r"\[([^\]]+)\]\(([^)]*)\)", text)]
 
 
 def _search_web_tool(query: str, k: int = 5) -> str:
@@ -295,7 +361,8 @@ tool failure in gaps — never claim the information doesn't exist.
 JSON:"""
 
 SYNTHESIZE_PROMPT = """Answer the user's question using ONLY the evidence below. \
-Cite sources with [filename] markers.
+Cite sources with [source › section] markers, copying the citation headers \
+from the evidence (for web results, cite [title](url) as given).
 
 Current date: {current_date}
 
@@ -615,11 +682,6 @@ def stream_agentic_ask(
     sufficient = False
     budget_exhausted = False
 
-    def _dispatch(tool: str, query: str) -> str:
-        if tool == "search_web":
-            return _search_web_tool(query)
-        return _search_docs_tool(query, settings=settings, retriever=retriever)
-
     while iteration < max_iterations:
         # Wall-clock budget: stop before starting another iteration.
         if time.perf_counter() - started >= budget_seconds:
@@ -633,12 +695,14 @@ def stream_agentic_ask(
         # evidence in plan order for synthesis (Phase 2, S3).
         for step in plan:
             _progress("action", f"Searching [{step['tool']}]: {step['query'][:60]}")
-        results = _dispatch_plan(plan, _dispatch)
-        for step, result in zip(plan, results):
+        # Phase 5 (A2+A3): sources come from the retrieval result, not
+        # from regex-scraping bracketed tokens out of tool text (which
+        # also captured [TOOL_ERROR], [NO_RESULTS], [CACHED …]).
+        step_results = _execute_plan(plan, settings, retriever)
+        for step, res in zip(plan, step_results):
             tool, q = step["tool"], step["query"]
-            all_evidence.append(f"--- {tool}: {q} ---\n{result}")
-            for m in re.finditer(r"\[([^\]]+)\]", result):
-                all_sources.add(m.group(1))
+            all_evidence.append(f"--- {tool}: {q} ---\n{res.text}")
+            all_sources.update(sources_from_step(step, res))
 
         # OBSERVATION: evaluate sufficiency.
         _progress("observation", "Evaluating if evidence is sufficient...")

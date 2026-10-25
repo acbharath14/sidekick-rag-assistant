@@ -9,7 +9,7 @@ import json
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from .config import Settings, get_embeddings, get_settings
+from .config import INDEX_FORMAT_VERSION, Settings, get_embeddings, get_settings
 from .sources import SOURCES, DocumentSource, MarkdownDirectorySource
 
 # Each non-default source gets its own index so corpora stay pristine.
@@ -38,12 +38,86 @@ def load_documents(settings: Settings):
     return MarkdownDirectorySource(settings.docs_dir).load()
 
 
+def _extract_headings(text: str) -> list[tuple[int, int, str]]:
+    """Markdown headings as (char_offset, level, title), in doc order."""
+    import re
+
+    headings = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if m:
+            headings.append((offset, len(m.group(1)), m.group(2).strip()))
+        offset += len(line)
+    return headings
+
+
+def _section_at(headings: list[tuple[int, int, str]], offset: int) -> str:
+    """Heading hierarchy in effect at a char offset, 'A > B' style."""
+    path: list[str] = []
+    for h_offset, level, title in headings:
+        if h_offset > offset:
+            break
+        while len(path) >= level:
+            path.pop()
+        path.append(title)
+    return " > ".join(path)
+
+
+def _slugify(text: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _chunk_section(headings, doc_text: str, chunk_text: str, cursor: int) -> tuple[str, int]:
+    """Section path for a chunk + the cursor advanced past its location.
+
+    Chunks are slices of the doc, so the chunk's opening text locates it;
+    overlap means the next chunk may start before the previous one ended,
+    so the cursor advances by one past the match, not past the chunk.
+    When the text cannot be located (splitter normalization), the last
+    known section is kept rather than guessed.
+    """
+    probe = chunk_text[:120] or chunk_text
+    pos = doc_text.find(probe, cursor) if probe else -1
+    if pos == -1 and len(chunk_text) > 20:
+        pos = doc_text.find(chunk_text[:20], cursor)
+    if pos == -1:
+        return "", cursor
+    return _section_at(headings, pos), pos + 1
+
+
 def chunk_documents(docs, settings: Settings):
+    """Split docs into chunks, stamping each with passage identity
+    (Phase 5, A2+A3): chunk_id = document id + section + ordinal, and
+    the section path from headings. Chunk texts and boundaries are
+    unchanged — only metadata is added, so existing chunk-count
+    expectations still hold. Docs without headings get section "" and
+    chunk_id 'doc_id:ordinal'."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
     )
-    return splitter.split_documents(docs)
+    out = []
+    for doc in docs:
+        doc_id = _doc_id(doc)
+        headings = _extract_headings(doc.page_content)
+        cursor = 0
+        section = ""
+        for ordinal, chunk in enumerate(splitter.split_documents([doc])):
+            found, cursor = _chunk_section(
+                headings, doc.page_content, chunk.page_content, cursor
+            )
+            if found:
+                section = found
+            chunk.metadata["section"] = section
+            slug = _slugify(section)
+            chunk.metadata["chunk_id"] = (
+                f"{doc_id}#{slug}:{ordinal}" if slug else f"{doc_id}:{ordinal}"
+            )
+            out.append(chunk)
+    return out
 
 
 def build_index(
@@ -66,7 +140,20 @@ def build_index(
         else {"documents": {}}
     )
     current = {_doc_id(d): _doc_sha(d.page_content) for d in docs}
-    if incremental and manifest.get("documents"):
+    # Phase 5 migration: an incremental skip must not preserve a stale
+    # format — an index without the current format marker is rebuilt even
+    # when document hashes match, so old indexes can never linger.
+    format_path = settings.index_dir / "index_format.json"
+    format_current = False
+    if format_path.exists():
+        try:
+            format_current = (
+                json.loads(format_path.read_text(encoding="utf-8")).get("version")
+                == INDEX_FORMAT_VERSION
+            )
+        except (OSError, ValueError):
+            format_current = False
+    if incremental and manifest.get("documents") and format_current:
         previous = {k: v["sha256"] for k, v in manifest["documents"].items()}
         if current == previous:
             print(
@@ -80,6 +167,7 @@ def build_index(
     # Persist the chunk texts alongside the vector index so the BM25 side of
     # hybrid retrieval can rebuild its corpus without re-reading the source.
     # allowed_groups powers permission-aware retrieval (PR #5).
+    # chunk_id + section power Phase 5 passage-level citations.
     (settings.index_dir / "chunks.json").write_text(
         json.dumps(
             [
@@ -88,10 +176,24 @@ def build_index(
                     "source": c.metadata.get("source", "?"),
                     "doc_id": c.metadata.get("doc_id", c.metadata.get("source", "?")),
                     "allowed_groups": c.metadata.get("allowed_groups", ["*"]),
+                    "chunk_id": c.metadata.get("chunk_id", ""),
+                    "section": c.metadata.get("section", ""),
                 }
                 for c in chunks
             ],
             ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    # Phase 5 format marker: loaders treat a missing or older marker as
+    # a stale index (citations degrade to filename-only + rebuild banner).
+    format_path.write_text(
+        json.dumps(
+            {
+                "version": INDEX_FORMAT_VERSION,
+                "features": ["chunk_id", "section"],
+            },
+            indent=1,
         ),
         encoding="utf-8",
     )

@@ -410,7 +410,7 @@ def _build_demo_index() -> bool:
     enterprise build above. Skips an index that already exists."""
     from rag_demo.ingest import build_index
     from rag_demo.sources import MarkdownDirectorySource, MockConfluenceSource
-    from rag_demo.preflight import index_present
+    from rag_demo.preflight import index_format_current, index_present
 
     settings = get_settings()
     demo_sources = [
@@ -420,9 +420,13 @@ def _build_demo_index() -> bool:
     with st.status("Building demo indexes…", expanded=True) as status:
         for source_key, src in demo_sources:
             index_dir = settings.index_dir.parent / INDEX_DIRS[source_key]
-            if index_present(index_dir):
+            if index_present(index_dir) and index_format_current(index_dir):
                 st.write(f"{source_key}: index already exists — skipping.")
                 continue
+            if index_present(index_dir):
+                # Phase 5: a stale index is rebuilt, not skipped — skipping
+                # it would leave filename-only citations in place.
+                st.write(f"{source_key}: index is from an older version — rebuilding.")
             st.write(f"Indexing {source_key}…")
             build_settings = get_settings()
             build_settings.index_dir = index_dir
@@ -998,6 +1002,16 @@ if not chat_ready:
     st.error("Chat is disabled until the items below are fixed:")
     for _problem in preflight.problems:
         st.markdown(f"- {_problem}")
+# Phase 5 (A2+A3): a stale index still answers, so this is a warning,
+# not a chat blocker — but it must be prominent, never silent.
+if getattr(preflight, "index_stale", False):
+    st.warning(
+        "⚠️ This index was built before chunk-level citations — answers cite "
+        "filenames only. Rebuild it for passage citations: "
+        f"`PYTHONPATH=src python -m rag_demo.ingest --source {corpus}`, or use "
+        "Build demo index in the Sources tab.",
+        icon="⚠️",
+    )
 
 # ------------------------------------------------------- regression run-all ---
 if st.session_state.pop("reg_run_all", False) and chat_ready:
@@ -1098,8 +1112,41 @@ if not st.session_state.messages:
                     st.rerun()
 
 # --------------------------------------------------------------- history ---
-def _hit_field(h, key):
-    return h[key] if isinstance(h, dict) else getattr(h, key)
+def _hit_field(h, key, default=""):
+    # Tolerant: chats persisted before Phase 5 lack chunk_id/section/
+    # confidence keys, and dict-vs-object varies by load path.
+    if isinstance(h, dict):
+        return h.get(key, default)
+    return getattr(h, key, default)
+
+
+def _render_hit(h, rank):
+    """Phase 5 passage line: rank + confidence band + passage citation.
+    Raw score and chunk id are debug detail, shown small — never the
+    headline the old `(score …)` line was."""
+    from rag_demo.retriever import confidence_band
+
+    source = _hit_field(h, "source")
+    section = _hit_field(h, "section")
+    citation = f"{source} › {section}" if section else source
+    band = confidence_band(_hit_field(h, "confidence", None))
+    st.markdown(f"**#{rank} · {band} confidence · [{citation}]**")
+    st.caption(_hit_field(h, "text")[:500])
+    _debug = []
+    _chunk = _hit_field(h, "chunk_id")
+    if _chunk:
+        _debug.append(f"chunk `{_chunk}`")
+    _score = _hit_field(h, "score", None)
+    if _score is not None:
+        _debug.append(f"raw score {_score:.3f} (debug)")
+    if _debug:
+        st.caption(" · ".join(_debug))
+
+
+WEAK_EVIDENCE_NOTICE = (
+    "⚠️ Weak evidence — no retrieved passage passed the relevance floor, "
+    "so this answer is not grounded in the corpus. Try rephrasing the question."
+)
 
 
 for msg in st.session_state.messages:
@@ -1123,14 +1170,12 @@ for msg in st.session_state.messages:
             )
         if msg.get("grounded") is False:
             st.markdown(FALLBACK_BADGE, unsafe_allow_html=True)
+        if msg.get("weak_evidence"):
+            st.warning(WEAK_EVIDENCE_NOTICE, icon="⚠️")
         if msg.get("hits"):
             with st.expander("Retrieved passages"):
-                for h in msg["hits"]:
-                    st.markdown(
-                        f"**[{_hit_field(h, 'source')}]** "
-                        f"(score {_hit_field(h, 'score'):.3f})"
-                    )
-                    st.caption(_hit_field(h, "text")[:500])
+                for _rank, h in enumerate(msg["hits"], start=1):
+                    _render_hit(h, _rank)
         if msg["role"] == "assistant" and msg.get("text"):
             with st.expander("📋 Copyable answer"):
                 st.code(msg["text"], language="markdown")
@@ -1371,15 +1416,16 @@ if question and chat_ready:
             )
         if not answer.grounded:
             st.markdown(FALLBACK_BADGE, unsafe_allow_html=True)
+        if answer.weak_evidence:
+            st.warning(WEAK_EVIDENCE_NOTICE, icon="⚠️")
         # Only show the rewrite when it led somewhere useful — displaying
         # "Understood as:" above a "No relevant answer" abstention is confusing.
         _is_abstention = "no relevant answer" in answer.text.lower()[:80]
         if answer.standalone_question and not _is_abstention:
             st.caption(f"🔍 Understood as: {answer.standalone_question}")
         with st.expander("Retrieved passages"):
-            for h in answer.hits:
-                st.markdown(f"**[{h.source}]** (score {h.score:.3f})")
-                st.caption(h.text[:500])
+            for _rank, h in enumerate(answer.hits, start=1):
+                _render_hit(h, _rank)
         with st.expander("📋 Copyable answer"):
             st.code(answer.text, language="markdown")
         fb_col1, fb_col2 = st.columns([1, 1])
@@ -1416,6 +1462,7 @@ if question and chat_ready:
             "case_id": reg_case["id"] if reg_case else None,
             "latency_ms": answer.latency_ms,
             "grounded": answer.grounded,
+            "weak_evidence": answer.weak_evidence,
         }
     )
     st.session_state.history.append((question, answer.text))
