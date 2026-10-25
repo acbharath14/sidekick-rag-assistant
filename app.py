@@ -1269,7 +1269,42 @@ WEAK_EVIDENCE_NOTICE = (
 )
 
 
-for msg in st.session_state.messages:
+def _render_answer_text(text, weak_evidence=False, diagrams_only=False):
+    """Render a chat answer, diagrams included.
+
+    Markdown segments render as markdown; ```mermaid blocks render as a
+    diagram (custom HTML component + mermaid.js) with the raw code always
+    shown underneath, so a failed render — or an offline browser that
+    cannot reach the CDN — is never a dead end. With weak evidence the
+    code is shown but NOT rendered: an ungrounded flow must not be
+    presented as a picture. diagrams_only=True is for the classic path,
+    where the streamed text is already on screen and only the diagrams
+    still need rendering."""
+    from rag_demo.chain import strip_think
+    from rag_demo.diagrams import render_html, split_message, validate_mermaid
+
+    for _kind, _seg in split_message(strip_think(text)):
+        if _kind == "md":
+            if not diagrams_only and _seg.strip():
+                st.markdown(_seg)
+            continue
+        if weak_evidence:
+            st.code(_seg, language="mermaid")
+            st.info(
+                "Diagram not rendered: the retrieved evidence was too weak "
+                "to ground this flow — the code above is the model's draft, "
+                "not a verified diagram."
+            )
+            continue
+        _ok, _reason = validate_mermaid(_seg)
+        if _ok:
+            st.components.v1.html(render_html(_seg), height=500, scrolling=True)
+        else:
+            st.warning(f"Diagram didn't render: {_reason}.")
+        st.code(_seg, language="mermaid")
+
+
+for _mi, msg in enumerate(st.session_state.messages):
     if _search and _search.lower() not in msg.get("text", "").lower():
         continue
     with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "📚"):
@@ -1277,7 +1312,12 @@ for msg in st.session_state.messages:
         # (from before the filter fix).
         from rag_demo.chain import strip_think
 
-        st.markdown(strip_think(msg["text"]))
+        if msg["role"] == "assistant":
+            _render_answer_text(
+                msg["text"], weak_evidence=bool(msg.get("weak_evidence"))
+            )
+        else:
+            st.markdown(strip_think(msg["text"]))
         if msg.get("sources"):
             pills = "".join(
                 f'<span class="citation-pill">{s}</span>' for s in msg["sources"]
@@ -1306,6 +1346,19 @@ for msg in st.session_state.messages:
             ):
                 for _name, _passed in msg["checks"]:
                     st.markdown(f"{'✓' if _passed else '✗'} {_name}")
+        if msg["role"] == "assistant" and msg.get("text"):
+            # "Show as diagram": re-ask the paired user question with a
+            # diagram instruction. The pending question is picked up by
+            # the question block below in this same run.
+            from rag_demo.diagrams import DIAGRAM_PREFIX
+
+            _prev_q = None
+            for _prev in reversed(st.session_state.messages[:_mi]):
+                if _prev["role"] == "user":
+                    _prev_q = _prev.get("text")
+                    break
+            if _prev_q and st.button("📊 Show as diagram", key=f"diagram-{_mi}"):
+                st.session_state["pending_question"] = f"{DIAGRAM_PREFIX}{_prev_q}"
 
 # ------------------------------------------------------------------ chat ---
 question = st.session_state.pop("pending_question", None) or st.chat_input(
@@ -1322,6 +1375,18 @@ if agentic_pending and chat_ready:
 
     pending_q = agentic_pending["question"]
     pending_plan = agentic_pending["plan"]
+    # Diagram request surviving plan approval: same instruction rule
+    # as the question block (button prefix or diagram keywords).
+    from rag_demo.diagrams import DIAGRAM_INSTRUCTION, DIAGRAM_PREFIX, is_diagram_request
+
+    if pending_q.startswith(DIAGRAM_PREFIX):
+        _agentic_ask_q = (
+            pending_q[len(DIAGRAM_PREFIX):] + "\n\n" + DIAGRAM_INSTRUCTION
+        )
+    elif is_diagram_request(pending_q):
+        _agentic_ask_q = pending_q + "\n\n" + DIAGRAM_INSTRUCTION
+    else:
+        _agentic_ask_q = pending_q
     # Display the user message (already in messages, just show plan UI).
     with st.chat_message("assistant", avatar="📚"):
         # If already approved (Execute was clicked), skip plan display and run.
@@ -1345,7 +1410,7 @@ if agentic_pending and chat_ready:
                     holder: dict = {}
                     def _agentic_tokens():
                         for event in stream_agentic_ask(
-                            pending_q, settings,
+                            _agentic_ask_q, settings,
                             verbose=False, show_plan=False,
                             on_progress=_on_progress,
                             history=st.session_state.get("history", []),
@@ -1364,7 +1429,9 @@ if agentic_pending and chat_ready:
                     st.stop()
                 status.update(label="✅ Done", state="complete")
 
-            st.markdown(answer.text)
+            _render_answer_text(
+                answer.text, weak_evidence=getattr(answer, "weak_evidence", False)
+            )
             _demo_sources_caption(app_mode == "demo")
             if answer.sources:
                 with st.expander("Sources"):
@@ -1382,6 +1449,15 @@ if agentic_pending and chat_ready:
         # ASCII flowchart (always works, no external dependency).
         st.code(format_plan_as_ascii(pending_plan, pending_q))
         st.caption("Each step shows the tool (📚 local docs / 🌐 web search) and the query.")
+        # Plan as a Mermaid diagram too (template-generated, not model
+        # output, so no validation gate — the code is shown regardless).
+        with st.expander("🗺️ Plan as diagram"):
+            from rag_demo.agent import format_plan_as_mermaid
+            from rag_demo.diagrams import render_html
+
+            _plan_mermaid = format_plan_as_mermaid(pending_plan, pending_q)
+            st.components.v1.html(render_html(_plan_mermaid), height=400, scrolling=True)
+            st.code(_plan_mermaid, language="mermaid")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -1404,6 +1480,21 @@ if question and chat_ready:
         if reg_case
         else st.session_state.history
     )
+    # Diagram requests (explicit only): the "📊 Diagram:" button prefix or
+    # a chat question naming a diagram/flowchart. The model gets the
+    # diagram instruction appended; the stored user message and the plan
+    # prompt keep the plain question, and retrieval/grounding are
+    # untouched (the instruction words join the retrieval query as-is).
+    from rag_demo.diagrams import DIAGRAM_INSTRUCTION, DIAGRAM_PREFIX, is_diagram_request
+
+    if question.startswith(DIAGRAM_PREFIX):
+        ask_question = (
+            question[len(DIAGRAM_PREFIX):] + "\n\n" + DIAGRAM_INSTRUCTION
+        )
+    elif is_diagram_request(question):
+        ask_question = question + "\n\n" + DIAGRAM_INSTRUCTION
+    else:
+        ask_question = question
     st.session_state.messages.append({"role": "user", "text": question})
     with st.chat_message("user", avatar="🧑"):
         st.markdown(question)
@@ -1456,7 +1547,7 @@ if question and chat_ready:
                 holder = {}
                 def _agentic_tokens():
                     for event in stream_agentic_ask(
-                        question, settings,
+                        ask_question, settings,
                         verbose=False, show_plan=False,
                         history=st.session_state.get("history", []),
                         retriever=active_retriever,
@@ -1475,7 +1566,9 @@ if question and chat_ready:
                 st.write("**Observation:** Synthesizing answer...")
                 status.update(label="✅ Done", state="complete")
 
-            st.markdown(answer.text)
+            _render_answer_text(
+                answer.text, weak_evidence=getattr(answer, "weak_evidence", False)
+            )
             _demo_sources_caption(app_mode == "demo")
             if answer.sources:
                 with st.expander("Sources"):
@@ -1496,7 +1589,7 @@ if question and chat_ready:
             def token_stream():
                 first_token = True
                 for event in stream_ask(
-                    question,
+                    ask_question,
                     settings,
                     history=ask_history,
                     user_groups=groups,
@@ -1546,6 +1639,12 @@ if question and chat_ready:
         with st.expander("Retrieved passages"):
             for _rank, h in enumerate(answer.hits, start=1):
                 _render_hit(h, _rank)
+        # Diagrams only here — the streamed text is already on screen;
+        # the history loop renders the full answer (text + diagrams) on
+        # the next rerun.
+        _render_answer_text(
+            answer.text, weak_evidence=answer.weak_evidence, diagrams_only=True
+        )
         with st.expander("📋 Copyable answer"):
             st.code(answer.text, language="markdown")
         fb_col1, fb_col2 = st.columns([1, 1])
