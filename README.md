@@ -22,13 +22,17 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
                                                         retrieval eval (evals/eval_retrieval.py)
 ```
 
-- **Sources** (`rag_demo/sources.py`): a `DocumentSource` is anything that
-  produces documents. Ships with eight sidebar corpora — a local markdown
-  folder (Meridian, the default), a Playwright-docs fetcher, a GitHub-repo
-  docs fetcher (public repos need no token), simulated Confluence fixtures,
-  and four real enterprise connectors (Confluence, Jira, Outlook, AWS S3)
-  implemented in `rag_demo/enterprise.py`. Each source gets its own FAISS
-  index; see `ARCHITECTURE.md` for the connector pattern.
+- **Sources** (`rag_demo/sources.py`, `rag_demo/modes.py`): a `DocumentSource`
+  is anything that produces documents. Sources are split into two paths
+  that never mix. **Demo mode** serves fictional data for zero-config trial:
+  the local markdown folder (Meridian) and simulated Confluence fixtures —
+  both marked fictional everywhere (mode label, banner, citations, export).
+  **Workspace mode** serves real sources: Documentation (a Playwright-docs
+  fetcher, a GitHub-repo docs fetcher for sidekick-rag-assistant itself —
+  public repos need no token) and Your workspace (four real enterprise
+  connectors: Confluence, Jira, Outlook, AWS S3, implemented in
+  `rag_demo/enterprise.py`). Each source gets its own FAISS index; see
+  `ARCHITECTURE.md` for the connector pattern.
 - **Ingestion** (`rag_demo/ingest.py`): load → `RecursiveCharacterTextSplitter`
   (500 chars, 50 overlap) → embeddings → FAISS, persisted to `.faiss_index/`.
 - **Retrieval** (`rag_demo/retriever.py`): similarity search with scores; every
@@ -96,6 +100,40 @@ PYTHONPATH=src python -m evals.regression --real-llm
 RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 ```
 
+### Setup script (fresh clone)
+
+`python scripts/setup.py` is the idempotent bootstrap: it checks
+dependencies, installs/starts Ollama if absent, pulls the default model
+(`qwen3:8b`), builds the demo indexes (Meridian + Confluence mock), and
+verifies with one test question. Re-running is safe — every step is
+skipped when already done. Honest limits: model weights are gigabytes
+and are fetched, not cloned, so the repo stays light; the macOS/Windows
+install branches are written carefully but not yet verified on real
+machines (if an automatic install fails, the script prints the manual
+steps instead of pretending success). Docker Compose is an optional
+self-contained alternative, not the default path.
+
+### Sidebar, Demo mode, and pre-flight checks
+
+The sidebar has three tabs. **💬 Chat** holds the agentic-mode toggle,
+the session, and the chat list. **📚 Sources** holds source/mode
+selection, index status, the **🔨 Build demo index** button (builds the
+demo indexes inside the app — no terminal needed; chat input enables
+automatically when the build finishes), enterprise-connector setup, and
+document upload. **⚙️ Settings** holds the retrieval-mode and rerank
+toggles (defaults: hybrid, rerank on), the general-knowledge fallback,
+the Tavily key, cache clears, diagnostics, and the regression runner.
+
+The **Mode** switch at the top of the sidebar is one visible control:
+**🎭 Demo (fictional data)** or **💼 Workspace**. First open lands in
+Workspace if any workspace source has a built index, else Demo; Demo
+mode carries its fictional marking persistently (banner, context line,
+citations, export), and the workspace path never shows a demo corpus.
+On startup the app runs **pre-flight checks** (Ollama reachable, model
+present, index present); when anything is missing, chat input is
+disabled and a fix-it banner says what is missing and how to fix it,
+instead of failing mid-question.
+
 ### Optional: other corpora
 
 ```bash
@@ -109,16 +147,17 @@ PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo owner/name
 # Simulated Confluence (JSON fixtures mirroring the REST API shape)
 PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
 
-# Real enterprise sources (need credentials; the sidebar also has setup panels)
+# Real enterprise sources (need credentials; the sidebar's Sources tab in
+# Workspace mode also has setup panels)
 PYTHONPATH=src python -m rag_demo.ingest --source confluence   # RAG_DEMO_CONFLUENCE_URL + RAG_DEMO_CONFLUENCE_TOKEN
 PYTHONPATH=src python -m rag_demo.ingest --source jira         # RAG_DEMO_JIRA_URL + RAG_DEMO_JIRA_TOKEN
 PYTHONPATH=src python -m rag_demo.ingest --source outlook      # RAG_DEMO_OUTLOOK_TOKEN
 PYTHONPATH=src python -m rag_demo.ingest --source aws-s3       # RAG_DEMO_AWS_S3_BUCKET
 ```
 
-Each source gets its own index (`.faiss_index*/`). The Streamlit sidebar
-lets you switch corpora; the CLI reads `RAG_DEMO_INDEX_DIR` if you want it
-there too.
+Each source gets its own index (`.faiss_index*/`). The sidebar's Sources
+tab (Demo or Workspace mode) lets you switch sources; the CLI reads
+`RAG_DEMO_INDEX_DIR` if you want it there too.
 
 ### Try the permission demo
 
@@ -138,13 +177,13 @@ docs only. See `ARCHITECTURE.md`.
 By default (`RAG_DEMO_HYBRID=1`), when the corpus has no answer the assistant
 falls back to the LLM's general knowledge — clearly marked with a
 🌐 badge and a "General knowledge (not from your corpus)" header, never
-silently mixed with cited facts. Uncheck it in the sidebar (or set
-`RAG_DEMO_HYBRID=0`) for strict corpus-only mode, where it says
+silently mixed with cited facts. Uncheck it in the sidebar's Settings tab
+(or set `RAG_DEMO_HYBRID=0`) for strict corpus-only mode, where it says
 "I don't know" instead.
 
 ### Regression prompts (in the UI)
 
-The sidebar has a **🧪 Regression prompts** expander: 9 standard prompts
+The sidebar's Settings tab has **🧪 Regression prompts**: 9 standard prompts
 (factual Q&A, code-identifier lookup, multi-turn follow-up, abstention,
 small-talk) that run through the full pipeline with live pass/fail checks —
 or **Run all** for the whole suite. Same cases as the CLI runner
@@ -154,15 +193,16 @@ or **Run all** for the whole suite. Same cases as the CLI runner
 
 - 👍/👎 under each answer persist to `feedback.jsonl` (next to the audit log
   when `RAG_DEMO_AUDIT_LOG` is set) — the start of a golden-set flywheel.
-- **📥 Export chat** in the sidebar downloads the conversation as Markdown.
-- The Engine panel shows **🟢/🔴 Ollama status**, and each answer reports
-  its latency and passage count.
+- **📥 Export chat** in the sidebar's Chat tab downloads the conversation as Markdown.
+- The Settings tab's Diagnostics show **🟢/🔴 Ollama status**, model
+  presence, and index presence, and each answer reports its latency and
+  passage count.
 - The always-on context banner above the chat shows which corpus each answer
   comes from, so a wrong-corpus answer can't pass silently.
 
 ### Chat management
 
-The sidebar's **💬 Chats** section keeps multiple named conversations —
+The sidebar's Chat tab keeps multiple named conversations —
 switch between them, rename, or delete. Chats persist to `chats/*.json`
 (gitignored) and survive restarts; new chats auto-title from the first
 question. **🔍 Search chat** filters the active conversation. A fresh chat
@@ -171,7 +211,7 @@ example prompts.
 
 ### Upload a document
 
-Upload a PDF, DOCX, TXT, MD, or CSV from the sidebar: it's extracted
+Upload a PDF, DOCX, TXT, MD, or CSV from the sidebar's Sources tab: it's extracted
 in-memory, summarized on demand, and queryable without touching the main
 index. **Scanned PDFs** (images, no embedded text) fall back to Tesseract
 OCR automatically — first install the binaries:
@@ -180,7 +220,7 @@ OCR automatically — first install the binaries:
 conda install -c conda-forge tesseract poppler
 ```
 
-In the Streamlit sidebar: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
+In the sidebar's Sources tab: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
 10 MB cap). The app extracts the text in memory, offers a **📝 Summarize**
 button (map-reduce for long docs), and **💬 Ask about this file** builds an
 in-memory index so you can chat over it with `[upload:filename]` citations.
@@ -242,21 +282,21 @@ never silently and never as a complete answer.
   heuristic skips the LLM planning call for obvious web queries, saving 20-30s on CPU.
 - **Tavily backend** — set `RAG_DEMO_TAVILY_API_KEY` (free tier: 1,000 searches/month
   at tavily.com) for reliable web search. Falls back to DuckDuckGo HTML scraping
-  without a key (often blocked/rate-limited). Enter the key in the Streamlit sidebar
+  without a key (often blocked/rate-limited). Enter the key in the sidebar's Settings tab
   under Agentic mode, or as an environment variable.
 - **Conversation memory** — follow-ups like "what about Target?" are rewritten to
   standalone questions using chat history, before routing. History is passed to all
   agent prompts for coherent multi-turn research.
 - **Search cache** — web results are cached per-session (30-min TTL) to save API
   credits. Cached hits are marked `[CACHED Xs ago]`; stale entries auto-refresh.
-  Clear via the sidebar "🗑️ Clear search cache" button.
+  Clear via the sidebar's Settings tab ("🗑️ Clear search cache" button).
 - **Tool-failure honesty** — `[TOOL_ERROR]` (network/timeout/blocked) is distinguished
   from `[NO_RESULTS]` (genuinely empty). The agent never claims "doesn't exist" from
   a tool failure.
 - **Plan approval** — optional ASCII flowchart preview with Execute/Edit/Cancel
   before the agent runs (CLI and Streamlit).
 
-Enable in the Streamlit sidebar ("🤖 Agentic mode") or via CLI:
+Enable in the sidebar's Chat tab ("🤖 Agentic mode") or via CLI:
 ```bash
 PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 ```
@@ -265,11 +305,14 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 
 ```
 ├── docs/                    # fictional corpus (the default knowledge base)
-├── app.py                   # Streamlit chat UI (streaming, citations, ACL demo)
+├── app.py                   # Streamlit chat UI (streaming, citations, ACL demo, Demo/Workspace modes, pre-flight)
+├── scripts/setup.py         # idempotent fresh-clone bootstrap (Ollama, model, demo indexes, test question)
 ├── .streamlit/config.toml   # UI theme
 ├── ARCHITECTURE.md          # pipeline, connector pattern, scale notes
 ├── src/rag_demo/
 │   ├── config.py            # env-based settings + model factories
+│   ├── modes.py             # Demo vs Workspace mode rules, picker labels, source statuses
+│   ├── preflight.py         # startup checks: Ollama, model, index (+ fix-it messages)
 │   ├── sources.py           # DocumentSource: 8 corpora (see enterprise.py for the real ones)
 │   ├── enterprise.py        # real Confluence / Jira / Outlook / AWS S3 connectors
 │   ├── ingest.py            # source → chunks → FAISS (+ --incremental, per-source indexes)
@@ -296,7 +339,7 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── regression.py        # end-to-end regression runner (standard prompts)
 │   ├── regression_cases.json # 9 demo cases: factual, abstention, small-talk, follow-up
 │   └── mcp_demo.py          # MCP server demo script
-└── tests/test_rag.py        # pytest suite (fake embeddings/LLM)
+└── tests/                   # pytest suite (fake embeddings/LLM): test_rag.py, test_phase4.py (modes, pre-flight, setup)
 ```
 
 ## Adapting it
