@@ -1,4 +1,4 @@
-"""Cross-encoder reranking (opt-in via RAG_DEMO_RERANK=1).
+"""Cross-encoder reranking (on by default; RAG_DEMO_RERANK=0 disables it).
 
 The sentence_transformers import is lazy and the model downloads on first
 use — this module is never touched under RAG_DEMO_FAKE=1, so CI stays fast

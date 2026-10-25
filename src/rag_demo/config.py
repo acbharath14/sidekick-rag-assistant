@@ -27,7 +27,7 @@ class Settings:
     )
     chunk_size: int = 500
     chunk_overlap: int = 50
-    top_k: int = 4
+    top_k: int = 8
 
     # Embeddings: "huggingface" (default) or "fake"
     embedding_provider: str = field(
@@ -46,15 +46,22 @@ class Settings:
         default_factory=lambda: os.environ.get("RAG_DEMO_BASE_URL", "http://localhost:11434")
     )
 
-    # Retrieval: "dense" (default, pure vector search) or "hybrid"
-    # (BM25 + dense with reciprocal rank fusion).
+    # Retrieval: "hybrid" (default, BM25 + dense with reciprocal rank
+    # fusion) or "dense" (pure vector search).
     retrieval: str = field(
-        default_factory=lambda: os.environ.get("RAG_DEMO_RETRIEVAL", "dense")
+        default_factory=lambda: os.environ.get("RAG_DEMO_RETRIEVAL", "hybrid")
     )
-    # Cross-encoder reranking of the top candidates. Opt-in: downloads a small
-    # model on first use, never on CI (RAG_DEMO_FAKE=1 leaves it off).
+    # Cross-encoder reranking of the top candidates. On by default;
+    # RAG_DEMO_RERANK=0 disables it. Downloads a small model on first use,
+    # never on CI: under RAG_DEMO_FAKE=1 the default stays off, so tests
+    # never touch sentence_transformers/torch. An explicit RAG_DEMO_RERANK
+    # value always wins, exactly as before.
     rerank_enabled: bool = field(
-        default_factory=lambda: os.environ.get("RAG_DEMO_RERANK") == "1"
+        default_factory=lambda: os.environ.get(
+            "RAG_DEMO_RERANK",
+            "0" if os.environ.get("RAG_DEMO_FAKE") == "1" else "1",
+        )
+        == "1"
     )
     # Query rewriting for multi-turn chat. Default on; no-op without history.
     rewrite_enabled: bool = field(
