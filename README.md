@@ -1,4 +1,4 @@
-# RAG Assistant Demo
+# Sidekick RAG Assistant
 
 A miniature **retrieval-augmented generation** assistant: documents get indexed
 into a vector store, and a chat UI / CLI / MCP tool answers questions with
@@ -23,18 +23,29 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 ```
 
 - **Sources** (`rag_demo/sources.py`): a `DocumentSource` is anything that
-  produces documents. Ships with two — a local markdown folder (default) and
-  an optional Playwright-docs fetcher. Enterprise connectors (Confluence,
-  SharePoint, …) implement the same interface; see `ARCHITECTURE.md`.
+  produces documents. Ships with eight sidebar corpora — a local markdown
+  folder (Meridian, the default), a Playwright-docs fetcher, a GitHub-repo
+  docs fetcher (public repos need no token), simulated Confluence fixtures,
+  and four real enterprise connectors (Confluence, Jira, Outlook, AWS S3)
+  implemented in `rag_demo/enterprise.py`. Each source gets its own FAISS
+  index; see `ARCHITECTURE.md` for the connector pattern.
 - **Ingestion** (`rag_demo/ingest.py`): load → `RecursiveCharacterTextSplitter`
   (500 chars, 50 overlap) → embeddings → FAISS, persisted to `.faiss_index/`.
 - **Retrieval** (`rag_demo/retriever.py`): similarity search with scores; every
-  hit carries its source file for citations.
+  hit carries its source file for citations. Expensive objects are cached
+  per session (`rag_demo/caching.py`): the embeddings object, the FAISS
+  retriever, and the episodic memory are built once per settings combination
+  instead of once per question; `RAG_DEMO_NO_CACHE=1` bypasses the cache.
 - **Answering** (`rag_demo/chain.py`): LCEL chain — retrieve → stuff into
   prompt → LLM. The system prompt forces answers from context only, with
   `[source.md]` citations; no relevant passages means "I don't know".
 - **MCP** (`rag_demo/mcp_server.py`): one tool, `search_docs(query, k)`, over
   stdio. Add it to any MCP client config.
+- **Episodic memory** (`rag_demo/episodic.py`): past questions and answers
+  are stored in a persistent LanceDB table (`.lancedb_episodic/`), so
+  follow-ups can recall earlier exchanges across Streamlit restarts. At most
+  3 relevant past exchanges feed follow-up rewriting; if LanceDB isn't
+  installed, this quietly disables itself instead of breaking answers.
 
 ## No API keys needed
 
@@ -42,8 +53,10 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 |---|---|---|
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local, no key) | `RAG_DEMO_EMBEDDINGS=fake` |
 | LLM | Ollama `qwen3:8b` at `localhost:11434` | `RAG_DEMO_MODEL`, `RAG_DEMO_BASE_URL` |
-| Retrieval | dense vector search | `RAG_DEMO_RETRIEVAL=hybrid` (BM25+dense) |
+| Retrieval | dense vector search, `top_k=4` | `RAG_DEMO_RETRIEVAL=hybrid` (BM25+dense) |
 | Rerank | off | `RAG_DEMO_RERANK=1` (cross-encoder, downloads once) |
+| Session cache | embeddings + FAISS retriever + episodic memory, built once per session | `RAG_DEMO_NO_CACHE=1` (bypass) |
+| Agentic budget | 4 iterations, 300s wall-clock | `RAG_DEMO_AGENT_MAX_ITERATIONS`, `RAG_DEMO_AGENT_BUDGET_SECONDS` |
 | Web search (agentic) | DuckDuckGo scraping (unreliable) | `RAG_DEMO_TAVILY_API_KEY` (recommended) |
 | Tests/CI | deterministic fakes | `RAG_DEMO_FAKE=1` |
 
@@ -95,6 +108,12 @@ PYTHONPATH=src python -m rag_demo.ingest --source github-docs --repo owner/name
 
 # Simulated Confluence (JSON fixtures mirroring the REST API shape)
 PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
+
+# Real enterprise sources (need credentials; the sidebar also has setup panels)
+PYTHONPATH=src python -m rag_demo.ingest --source confluence   # RAG_DEMO_CONFLUENCE_URL + RAG_DEMO_CONFLUENCE_TOKEN
+PYTHONPATH=src python -m rag_demo.ingest --source jira         # RAG_DEMO_JIRA_URL + RAG_DEMO_JIRA_TOKEN
+PYTHONPATH=src python -m rag_demo.ingest --source outlook      # RAG_DEMO_OUTLOOK_TOKEN
+PYTHONPATH=src python -m rag_demo.ingest --source aws-s3       # RAG_DEMO_AWS_S3_BUCKET
 ```
 
 Each source gets its own index (`.faiss_index*/`). The Streamlit sidebar
@@ -125,7 +144,7 @@ silently mixed with cited facts. Uncheck it in the sidebar (or set
 
 ### Regression prompts (in the UI)
 
-The sidebar has a **🧪 Regression prompts** expander: 8 standard prompts
+The sidebar has a **🧪 Regression prompts** expander: 9 standard prompts
 (factual Q&A, code-identifier lookup, multi-turn follow-up, abstention,
 small-talk) that run through the full pipeline with live pass/fail checks —
 or **Run all** for the whole suite. Same cases as the CLI runner
@@ -138,6 +157,8 @@ or **Run all** for the whole suite. Same cases as the CLI runner
 - **📥 Export chat** in the sidebar downloads the conversation as Markdown.
 - The Engine panel shows **🟢/🔴 Ollama status**, and each answer reports
   its latency and passage count.
+- The always-on context banner above the chat shows which corpus each answer
+  comes from, so a wrong-corpus answer can't pass silently.
 
 ### Chat management
 
@@ -197,13 +218,25 @@ Then ask your client to "search the Meridian docs for the rollback procedure"
 
 Beyond single-shot retrieval, the agent (`rag_demo/agent.py`) runs a **ReAct loop**
 (Thought → Action → Observation) that plans multi-step research, calls tools,
-evaluates evidence, and refines its approach — up to 4 iterations before synthesizing.
+evaluates evidence, and refines its approach — up to 4 iterations
+(`RAG_DEMO_AGENT_MAX_ITERATIONS`) and a 300s wall-clock budget
+(`RAG_DEMO_AGENT_BUDGET_SECONDS`) before synthesizing. On budget exhaustion
+it stops with the evidence gathered so far plus an explicit uncertainty note,
+never silently and never as a complete answer.
 
 **Tools:**
 - `search_docs` — local FAISS corpus (technical documentation)
 - `search_web` — web search via Tavily API (recommended) or DuckDuckGo fallback
 
 **Features:**
+- **Parallel search dispatch** — the plan's search calls (FAISS, Tavily) run
+  concurrently with order preserved for synthesis; LLM calls (planning,
+  observation, synthesis) stay sequential, since they contend on the same CPU
+  model.
+- **Single planning** — the UI-built plan is passed into the agent, so it
+  doesn't plan twice; direct API/CLI callers still get one fallback plan.
+- **Streamed synthesis** — agentic answers stream tokens like classic mode
+  instead of returning one-shot at the end.
 - **Smart routing** — the planner picks `search_docs` for API/code questions and
   `search_web` for everything else (prices, news, general knowledge). A fast-path
   heuristic skips the LLM planning call for obvious web queries, saving 20-30s on CPU.
@@ -237,13 +270,17 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 ├── ARCHITECTURE.md          # pipeline, connector pattern, scale notes
 ├── src/rag_demo/
 │   ├── config.py            # env-based settings + model factories
-│   ├── sources.py           # DocumentSource: meridian, playwright, github, confluence-mock
+│   ├── sources.py           # DocumentSource: 8 corpora (see enterprise.py for the real ones)
+│   ├── enterprise.py        # real Confluence / Jira / Outlook / AWS S3 connectors
 │   ├── ingest.py            # source → chunks → FAISS (+ --incremental, per-source indexes)
 │   ├── retriever.py         # dense / hybrid (BM25+RRF) + ACL filtering
 │   ├── rerank.py            # cross-encoder reranking (opt-in)
 │   ├── rewrite.py           # multi-turn query rewriting
 │   ├── chain.py             # RAG chain with citations (+ streaming)
-│   ├── agent.py             # agentic RAG: ReAct loop (Thought → Action → Observation)
+│   ├── caching.py           # per-session cache: embeddings, retriever, episodic memory
+│   ├── episodic.py          # LanceDB episodic memory (past Q&A recall)
+│   ├── chat_store.py        # persisted sidebar chats (chats/*.json)
+│   ├── agent.py             # agentic RAG: ReAct loop, parallel dispatch, streamed synthesis, budgets
 │   ├── agentic_cli.py       # CLI for agentic mode with plan approval
 │   ├── audit.py             # opt-in JSONL audit log
 │   ├── extract.py           # file text extraction (pdf/docx/txt/md/csv)
@@ -257,7 +294,8 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── eval_compare.py      # dense vs hybrid vs hybrid+rerank table
 │   ├── baselines.json       # per-mode hit-rate floors
 │   ├── regression.py        # end-to-end regression runner (standard prompts)
-│   └── regression_cases.json # 8 demo cases: factual, abstention, small-talk, follow-up
+│   ├── regression_cases.json # 9 demo cases: factual, abstention, small-talk, follow-up
+│   └── mcp_demo.py          # MCP server demo script
 └── tests/test_rag.py        # pytest suite (fake embeddings/LLM)
 ```
 
@@ -286,11 +324,9 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 one JSON line per question (timestamp, question, sources, groups, model,
 latency). Answer text is excluded unless `RAG_DEMO_AUDIT_LOG_ANSWERS=1`.
 
-**Project status**: `STATUS.md` at the repo root is the durable record of
-where things stand, next actions, and decisions — kept current at the end of
-every work session (convention from
-[dev-harness](https://github.com/acbharath14/dev-harness), where this repo is
-the pilot project).
+**Project status**: `STATUS.md` at the repo root is a dated status log (last
+updated 2026-10-08) — useful history, but not kept current per session. The
+code and this README are the current record.
 
 ## License
 
