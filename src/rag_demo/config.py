@@ -65,6 +65,18 @@ class Settings:
     hybrid_fallback: bool = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_HYBRID", "1") == "1"
     )
+    # Agentic loop budget (Phase 2, S3): iteration cap + wall-clock cap.
+    # The iteration cap preserves the old MAX_ITERATIONS default (4).
+    # The wall-clock cap is generous (5 min, matching the LLM timeout) so
+    # it only fires on genuinely stuck runs, not on slow-but-healthy CPU
+    # runs. When either cap is hit, the agent stops with the evidence
+    # gathered so far plus an explicit uncertainty note (see agent.py).
+    agent_max_iterations: int = field(
+        default_factory=lambda: int(os.environ.get("RAG_DEMO_AGENT_MAX_ITERATIONS", "4"))
+    )
+    agent_budget_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("RAG_DEMO_AGENT_BUDGET_SECONDS", "300"))
+    )
     # GitHub connector: token (never committed) and default repo.
     github_token: str | None = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_GITHUB_TOKEN")
