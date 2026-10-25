@@ -170,6 +170,18 @@ retrieval): it builds its own index, so it runs even when pre-flight
 disables chat, and it stops at retrieval — no generation, no summarize
 step.
 
+## Diagrams (`diagrams.py`)
+
+Explicit-trigger only (a chat question asking for a diagram, or the
+📊 Show as diagram button under an answer). The model answers with a
+closed ```mermaid flowchart, which `diagrams.py` extracts and validates
+heuristically (header, balanced quotes/brackets, no HTML tags except
+`<br/>`, no script content — not a full parser) and renders with a
+built-in HTML component loading mermaid.js from a CDN. The raw code is
+always shown under any rendered diagram; weak evidence means the code is
+shown but not rendered, and invalid syntax gets a "didn't render" note.
+No auto-detection, no repair retry in v1.
+
 ## Scale notes (demo → production)
 
 The demo indexes hundreds of chunks into a single local FAISS file. A real
@@ -205,7 +217,10 @@ deployment (hundreds of thousands of pages) changes the *operations*, not the
 reports hit-rate@k, exiting non-zero below a threshold (`--retrieval` and
 `--rerank` flags select the pipeline). `evals/eval_compare.py` prints a
 dense-vs-hybrid-vs-rerank table and fails on regression vs
-`evals/baselines.json` (real-embedding runs). The discipline this installs:
+`evals/baselines.json` (real-embedding runs). `evals/per_source.py` runs
+one prompt set per source (accuracy, retrieval, rerank before-vs-after,
+precision at chunk + section) and skips with a reason — never crashes —
+on a missing index or unconnected enterprise source. The discipline this installs:
 
 - Retrieval is measured, not assumed — every chunking or embedding change
   gets a number before it ships.
