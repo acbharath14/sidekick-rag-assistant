@@ -208,6 +208,10 @@ def _load_setup_module():
     )
     spec = importlib.util.spec_from_file_location("sidekick_setup", path)
     module = importlib.util.module_from_spec(spec)
+    # Required since setup.py gained a @dataclass (prerequisite checks):
+    # with `from __future__ import annotations`, dataclass resolution
+    # needs the module registered in sys.modules before exec.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
