@@ -1,8 +1,10 @@
 __pycache__/
 *.py[cod]
 .venv/
+venv/
 .faiss_index/
 .faiss_index_playwright/
+.faiss_index*/
 .playwright-docs/
 *.egg-info/
 .pytest_cache/
@@ -10,3 +12,13 @@ __pycache__/
 chats/
 .agents/
 .lancedb_episodic/
+# Local secrets / env files (README promises these are never committed)
+.env
+.env.*
+# Feedback written next to the audit log / cwd by default (audit.py)
+feedback.jsonl
+# Editor / OS leftovers
+.idea/
+.vscode/
+*.log
+.streamlit/secrets.toml

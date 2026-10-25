@@ -31,8 +31,6 @@ Honest limits (also in the README):
   have NOT been verified on real macOS/Windows machines. If an
   automatic install fails, the script prints the manual steps and
   exits non-zero instead of pretending success.
-- Docker Compose is an optional self-contained alternative, not the
-  default path; this script is the default.
 
 Stdlib only. Safe to re-run: every step checks current state first.
 """

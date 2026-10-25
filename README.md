@@ -113,8 +113,7 @@ skipped when already done. Honest limits: model weights are gigabytes
 and are fetched, not cloned, so the repo stays light; the macOS/Windows
 install branches are written carefully but not yet verified on real
 machines (if an automatic install fails, the script prints the manual
-steps instead of pretending success). Docker Compose is an optional
-self-contained alternative, not the default path.
+steps instead of pretending success).
 
 ### Sidebar, Demo mode, and pre-flight checks
 
@@ -375,7 +374,10 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── extract.py           # file text extraction (pdf/docx/txt/md/csv)
 │   ├── summarize.py         # map-reduce document summarization
 │   ├── cli.py               # conversational REPL (with history)
-│   └── mcp_server.py        # MCP server (search_docs tool)
+│   ├── mcp_server.py        # MCP server (search_docs tool)
+│   ├── diagrams.py          # Mermaid diagram extraction, validation, rendering
+│   ├── walkthrough.py       # pipeline-walkthrough stages (chunking, embedding, retrieval)
+│   └── ocr.py               # Tesseract OCR fallback for scanned PDFs
 ├── fixtures/confluence/     # mock Confluence REST fixtures (incl. restricted page)
 ├── evals/
 │   ├── golden.json          # 20 Q&A pairs with expected source docs
@@ -387,7 +389,10 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── per_source.py        # per-source suites: accuracy, retrieval, rerank, precision
 │   ├── per_source/          # one prompt file per source with real content
 │   └── mcp_demo.py          # MCP server demo script
-└── tests/                   # pytest suite (fake embeddings/LLM): test_rag.py, test_phase4.py (modes, pre-flight, setup)
+└── tests/                   # pytest suite (fake embeddings/LLM): test_rag.py,
+                            # test_phase4.py (modes, pre-flight), test_phase5.py
+                            # (grounding), test_diagrams.py, test_walkthrough.py,
+                            # test_setup_prereqs.py, test_per_source.py
 ```
 
 ## Adapting it

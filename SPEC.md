@@ -3,6 +3,11 @@
 **Status:** Draft for approval · **Date:** 2026-10-04
 **Repo:** `acbharath14/sidekick-rag-assistant` (PR #1 open with initial build)
 
+> **Historical note:** this is the original 2026-10-04 approval draft, kept
+> for history. It predates the shipped implementation — `README.md` and
+> `ARCHITECTURE.md` are the current record; dates and PR references here
+> are not current.
+
 This document describes the complete feature set with implementation details.
 Approve as-is, or reply with what to change — no typing marathons needed.
 
