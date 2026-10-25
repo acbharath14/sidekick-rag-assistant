@@ -26,7 +26,7 @@ Each stage has one job and one seam:
 | Load | `sources.py` | `DocumentSource` interface |
 | Split | `ingest.py` | chunk size/overlap in `Settings` |
 | Embed | `config.py` | `get_embeddings()` factory |
-| Retrieve | `retriever.py` | `top_k`, score threshold |
+| Retrieve | `retriever.py` | `top_k`, relevance floor |
 | Generate | `chain.py` | system prompt, LLM factory |
 
 ## The connector pattern
@@ -39,9 +39,18 @@ class DocumentSource(ABC):
     def load(self) -> list[Document]: ...
 ```
 
-The demo ships two: `MarkdownDirectorySource` (local files) and
-`PlaywrightDocsSource` (sparse git checkout). A Confluence connector is the
-same shape:
+The eight sidebar corpora share this interface, split into two paths that
+never mix (`modes.py`): **Demo mode** serves fictional data for zero-config
+trial — `meridian` (local markdown folder) and `confluence-mock` (simulated
+Confluence fixtures), both marked fictional everywhere. **Workspace mode**
+serves real sources — Documentation (`PlaywrightDocsSource`, sparse git
+checkout; `GitHubDocsSource`, repo markdown via the API, public repos
+needing no token) and Your workspace (four real enterprise connectors in
+`enterprise.py`: `ConfluenceSource`, `JiraSource`, `OutlookSource`,
+`AWSS3Source`). Each source gets its own FAISS index
+(`ingest.INDEX_DIRS`); the mode rules (`DEMO_CORPORA`,
+`WORKSPACE_CORPORA`) live in `modes.py`. A connector is the same shape —
+the real Confluence connector in `enterprise.py` follows it:
 
 ```python
 class ConfluenceSource(DocumentSource):
@@ -53,7 +62,7 @@ class ConfluenceSource(DocumentSource):
             "source": page.title,
             "url": page.url,
             "space": page.space,
-            "permissions": page.restrictions,   # see below
+            "allowed_groups": page.restrictions,   # see below
         }) for page in pages]
 ```
 
@@ -85,13 +94,81 @@ Try it: index `--source confluence-mock`, then ask about "driver pay bands" with
 ```
 question ──▶ rewrite (multi-turn) ──▶┬──▶ dense (FAISS, top-20) ──┐
                                      └──▶ BM25 (chunks.json, top-20) ─┤
-                                                                      ├─▶ RRF fuse ─▶ ACL filter ─▶ rerank? ─▶ top-k ─▶ prompt ─▶ LLM
+                                                                      ├─▶ RRF fuse ─▶ ACL filter ─▶ rerank? ─▶ floor ─▶ top-k ─▶ prompt ─▶ LLM
 ```
 
-- `RAG_DEMO_RETRIEVAL=dense` (default) skips the BM25 branch.
-- `RAG_DEMO_RERANK=1` reranks the fused top-20 with a cross-encoder.
+- Default is hybrid: dense (FAISS, top-20 candidates) + BM25 (over the
+  `chunks.json` the index build writes, top-20 candidates), fused with
+  reciprocal rank fusion (`RRF_K = 60`). `RAG_DEMO_RETRIEVAL=dense` skips
+  the BM25 branch.
+- Rerank is on by default: the fused candidates are re-scored with a
+  cross-encoder (`rerank.py`). `RAG_DEMO_RERANK=0` disables it; under
+  `RAG_DEMO_FAKE=1` the default stays off so tests never touch torch.
+- Relevance floor (`RAG_DEMO_RELEVANCE_FLOOR`, default 0.5, 0 disables):
+  applied to the full candidate pool before the top-k trim. It never runs
+  on RRF scores (purely relative ranks, no absolute signal) — it uses the
+  rerank logit (sigmoid) when reranked, else the dense L2 distance
+  (0.5 = distance 1.0). A hit with no absolute signal (BM25-only, rerank
+  off) is kept, not dropped on a meaningless number. When nothing passes,
+  the answer carries a weak-evidence flag and the UI shows an explicit
+  notice instead of a confident guess, with the prompt taking the
+  abstain-friendly path.
+- Passage identity: ingest (`ingest.py`, `RecursiveCharacterTextSplitter`,
+  500 chars / 50 overlap from `Settings`) stamps every chunk with a chunk
+  id (document id + section + ordinal) and the section path from the
+  document's headings, so citations point at a passage, not just a file.
+  `Hit` carries `chunk_id` + `section`; prompts cite
+  `[source › section]`. Retrieved passages display rank plus a qualitative
+  confidence band (High/Medium/Low); raw scores appear only as debug
+  detail.
 - `evals/eval_compare.py` measures dense vs hybrid vs hybrid+rerank on the
   golden set; baselines live in `evals/baselines.json`.
+
+## Per-session caching (`caching.py`)
+
+Expensive objects are built once per settings combination, not once per
+question: the embeddings object, the FAISS retriever, and the episodic
+memory. The cache key is (embedding provider, embedding model, index dir,
+retrieval mode, rerank enabled), so changing a setting yields a fresh
+retriever; the cache is cleared after an enterprise index rebuild.
+`RAG_DEMO_NO_CACHE=1` bypasses it. The cache is module dicts, not
+`@st.cache_resource`, so it stays testable without Streamlit.
+
+## Answering (`chain.py`)
+
+LCEL chain — retrieve → stuff into prompt → LLM. The system prompt forces
+answers from context only, with `[source.md › Section]` citations; no
+relevant passages means "I don't know". Multi-turn follow-ups are
+rewritten to standalone questions from at most the last 3 turns of
+history before retrieval; chat history itself never grows the
+generation prompt.
+
+## MCP server (`mcp_server.py`)
+
+One tool, `search_docs(query, k)`, over stdio, served from the same
+retriever as chat. Point any MCP client at the process; see the README's
+MCP client setup for the config block.
+
+## Episodic memory (`episodic.py`)
+
+Past questions and answers live in a persistent LanceDB table
+(`.lancedb_episodic/`), so follow-ups can recall earlier exchanges across
+Streamlit restarts. At most 3 relevant past exchanges feed follow-up
+rewriting; if LanceDB isn't installed, this quietly disables itself
+instead of breaking answers.
+
+## Pipeline walkthrough (`walkthrough.py`)
+
+A stage-by-stage view of chunking → embedding → retrieval on a specimen
+document or pasted text, with similarity scores at retrieval. It runs the
+real pipeline code paths — `ingest.chunk_documents` (500/50 splitter,
+chunk ids + sections), `config.get_embeddings`, and a `Retriever` over an
+in-memory FAISS store built from exactly those chunks (the same
+store+chunks injection the upload path uses, so hybrid/RRF/rerank/floor
+behave as in chat). The stage list is exactly (chunking, embedding,
+retrieval): it builds its own index, so it runs even when pre-flight
+disables chat, and it stops at retrieval — no generation, no summarize
+step.
 
 ## Scale notes (demo → production)
 
@@ -114,8 +191,10 @@ deployment (hundreds of thousands of pages) changes the *operations*, not the
 
 ## What the demo deliberately omits
 
-- Real Confluence/SharePoint/Jira connectors (no credentials by design —
-  the mock source demonstrates the connector contract).
+- Real SharePoint connector (Confluence, Jira, Outlook, and AWS S3
+  connectors exist in `enterprise.py`; SharePoint appears only as a
+  docstring example). Credentials are still never in the repo —
+  connectors read env vars only.
 - User identity / auth UI (groups come from `RAG_DEMO_USER_GROUPS`, as they
   would from a gateway header in production).
 - Multi-tenant isolation.

@@ -12,58 +12,35 @@ thin air.
 ## How it works
 
 ```
-DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
-                                              │
-                    ┌─────────────────────────┼──────────────────────────┐
-                    ▼                         ▼                          ▼
-             Streamlit chat UI         conversational CLI         MCP `search_docs` tool
-             (app.py)                  (python -m rag_demo.cli)   (python -m rag_demo.mcp_server)
-
-                                                        retrieval eval (evals/eval_retrieval.py)
+Documents ──chunk──▶ passages ──embed──▶ index ──retrieve──▶ cited answer
 ```
 
-- **Sources** (`rag_demo/sources.py`, `rag_demo/modes.py`): a `DocumentSource`
-  is anything that produces documents. Sources are split into two paths
-  that never mix. **Demo mode** serves fictional data for zero-config trial:
-  the local markdown folder (Meridian) and simulated Confluence fixtures —
-  both marked fictional everywhere (mode label, banner, citations, export).
-  **Workspace mode** serves real sources: Documentation (a Playwright-docs
-  fetcher, a GitHub-repo docs fetcher for sidekick-rag-assistant itself —
-  public repos need no token) and Your workspace (four real enterprise
-  connectors: Confluence, Jira, Outlook, AWS S3, implemented in
-  `rag_demo/enterprise.py`). Each source gets its own FAISS index; see
-  `ARCHITECTURE.md` for the connector pattern.
-- **Ingestion** (`rag_demo/ingest.py`): load → `RecursiveCharacterTextSplitter`
-  (500 chars, 50 overlap) → embeddings → FAISS, persisted to `.faiss_index/`.
-  Every chunk carries passage identity: a chunk id (document id + section +
-  ordinal) and the section path from the document's headings, so citations
-  can point at a passage, not just a file.
-- **Retrieval** (`rag_demo/retriever.py`): similarity search with scores; every
-  hit carries its source file, section, and chunk id for citations. A
-  relevance floor (`RAG_DEMO_RELEVANCE_FLOOR`, default 0.5) drops passages
-  below a confidence threshold before they reach the prompt; when nothing
-  passes, the UI shows an explicit weak-evidence notice instead of a
-  confident guess. Retrieved passages display rank plus a qualitative
-  confidence band (High/Medium/Low); raw scores appear only as debug detail.
-  Expensive objects are cached per session (`rag_demo/caching.py`): the
-  embeddings object, the FAISS retriever, and the episodic memory are built
-  once per settings combination instead of once per question;
-  `RAG_DEMO_NO_CACHE=1` bypasses the cache.
-- **Pipeline walkthrough** (`rag_demo/walkthrough.py`, sidebar "How it works"):
-  a stage-by-stage view of chunking → embedding → retrieval on a specimen
-  document or pasted text, with similarity scores at the retrieval stage.
-  It runs the real pipeline code paths on its own document — never the
-  current corpus — and stops at retrieval: no generation, no summarize step.
-- **Answering** (`rag_demo/chain.py`): LCEL chain — retrieve → stuff into
-  prompt → LLM. The system prompt forces answers from context only, with
-  `[source.md › Section]` citations; no relevant passages means "I don't know".
-- **MCP** (`rag_demo/mcp_server.py`): one tool, `search_docs(query, k)`, over
-  stdio. Add it to any MCP client config.
-- **Episodic memory** (`rag_demo/episodic.py`): past questions and answers
-  are stored in a persistent LanceDB table (`.lancedb_episodic/`), so
-  follow-ups can recall earlier exchanges across Streamlit restarts. At most
-  3 relevant past exchanges feed follow-up rewriting; if LanceDB isn't
-  installed, this quietly disables itself instead of breaking answers.
+- **Sources.** Documents come from two places that never mix. **Demo mode**
+  uses fictional data for zero-config trial (a made-up freight company's
+  docs and simulated Confluence pages), marked fictional everywhere — mode
+  label, banner, citations, and exports. **Workspace mode** uses real
+  sources: documentation (Playwright docs, this repo's own docs) and your
+  workspace (Confluence, Jira, Outlook, AWS S3). Each source gets its own
+  index.
+- **From documents to answers.** Documents are split into passages,
+  embedded, and indexed. A question retrieves the most relevant passages,
+  and the answer is built from those passages only, citing each fact to
+  its source passage (`[source.md › Section]`). If nothing relevant is
+  found, the assistant says "I don't know" instead of guessing — and if
+  the best passages are too weak to trust, it says so explicitly rather
+  than answering confidently.
+- **Pipeline walkthrough.** The sidebar's "How it works" button shows the
+  chunking → embedding → retrieval stages on a sample document or text
+  you paste, with similarity scores. It runs on its own document, never
+  your corpus, and stops before generating an answer.
+- **More ways to ask.** The same retrieval powers a chat UI, a terminal
+  chat, and a one-tool MCP server (`search_docs`) for MCP clients. An
+  optional agentic mode plans multi-step research across local docs and
+  the web. Past questions and answers are remembered across restarts, so
+  follow-ups can build on earlier exchanges.
+
+See `ARCHITECTURE.md` for the module-level detail: the connector pattern,
+the retrieval pipeline, caching, and scale notes.
 
 ## No API keys needed
 
