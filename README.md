@@ -238,6 +238,19 @@ question. **🔍 Search chat** filters the active conversation. A fresh chat
 opens on a welcome screen describing what Sidekick can do, with clickable
 example prompts.
 
+### Diagrams (Mermaid)
+
+Ask for a diagram explicitly — "show this as a diagram", "draw a
+flowchart of the deploy" — or click **📊 Show as diagram** under any
+assistant answer to re-ask that question as a diagram. The model answers
+with a ```mermaid flowchart, rendered as a picture in chat; the raw code
+is always shown underneath, so a failed render is never a dead end.
+Diagrams are grounded like text answers: weak evidence means the code is
+shown but not rendered, never a freestyled flow. Rendering uses a small
+built-in HTML component with mermaid.js from a CDN (no new dependency) —
+it needs internet at view time; offline, the code block is still there.
+No auto-detection in v1: the model draws a diagram only when asked.
+
 ### Upload a document
 
 Upload a PDF, DOCX, TXT, MD, or CSV from the sidebar's Sources tab: it's extracted
