@@ -49,6 +49,11 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
   embeddings object, the FAISS retriever, and the episodic memory are built
   once per settings combination instead of once per question;
   `RAG_DEMO_NO_CACHE=1` bypasses the cache.
+- **Pipeline walkthrough** (`rag_demo/walkthrough.py`, sidebar "How it works"):
+  a stage-by-stage view of chunking → embedding → retrieval on a specimen
+  document or pasted text, with similarity scores at the retrieval stage.
+  It runs the real pipeline code paths on its own document — never the
+  current corpus — and stops at retrieval: no generation, no summarize step.
 - **Answering** (`rag_demo/chain.py`): LCEL chain — retrieve → stuff into
   prompt → LLM. The system prompt forces answers from context only, with
   `[source.md › Section]` citations; no relevant passages means "I don't know".
@@ -126,7 +131,8 @@ self-contained alternative, not the default path.
 ### Sidebar, Demo mode, and pre-flight checks
 
 The sidebar has three tabs. **💬 Chat** holds the agentic-mode toggle,
-the session, and the chat list. **📚 Sources** holds source/mode
+the **🔍 How it works** pipeline-walkthrough button, the session, and the
+chat list. **📚 Sources** holds source/mode
 selection, index status, the **🔨 Build demo index** button (builds the
 demo indexes inside the app — no terminal needed; chat input enables
 automatically when the build finishes), enterprise-connector setup, and
