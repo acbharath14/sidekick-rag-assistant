@@ -30,6 +30,16 @@ from rag_demo.chat_store import (
 )
 from rag_demo.config import get_embeddings, get_settings
 from rag_demo.ingest import INDEX_DIRS
+from rag_demo.modes import (
+    CORPUS_DISPLAY,
+    DEMO_CORPORA,
+    WORKSPACE_CORPORA,
+    WORKSPACE_ENTERPRISE_SOURCES,
+    connected_sources,
+    default_mode,
+    source_status,
+)
+from rag_demo.preflight import run_preflight
 from rag_demo.sources import SOURCES
 
 st.set_page_config(
@@ -181,16 +191,10 @@ st.markdown(
 
 settings = get_settings()
 
-CORPUS_LABELS = {
-    "meridian": "Meridian Logistics (fictional)",
-    "playwright-docs": "Playwright docs",
-    "github-docs": "GitHub repo docs",
-    "confluence-mock": "Confluence (mock)",
-    "confluence": "Confluence (real)",
-    "jira": "Jira issues",
-    "outlook": "Outlook emails",
-    "aws-s3": "AWS S3 documents",
-}
+# Phase 4 (U1+U2): source labels live in modes.py (Demo labels carry the
+# fictional marking; the GitHub label names the repo explicitly).
+# CORPUS_DISPLAY is mutated with the "upload" entry at runtime, exactly
+# as the old CORPUS_LABELS dict was.
 
 SUGGESTIONS = {
     "meridian": [
@@ -212,21 +216,22 @@ SUGGESTIONS = {
     ],
 }
 
-def _ollama_reachable(base_url: str) -> bool:
-    try:
-        import urllib.request
-
-        urllib.request.urlopen(f"{base_url}/api/tags", timeout=2)
-        return True
-    except Exception:  # noqa: BLE001 — unreachable is a status, not an error
-        return False
-
-
 FALLBACK_BADGE = '<span class="citation-pill">🌐 General knowledge</span>'
 
 
-def _chat_markdown(messages: list[dict]) -> str:
+def _demo_sources_caption(is_demo: bool) -> None:
+    """Fictional-data marking above demo citations (Phase 4, U1+U2):
+    demo answers wear the marking on their sources, not just on the mode
+    banner, so a copied answer cannot pass as real-company evidence."""
+    if is_demo:
+        st.caption("🎭 Demo sources — fictional data, for trial only.")
+
+
+def _chat_markdown(messages: list[dict], demo: bool = False) -> str:
     lines = ["# Sidekick chat export", ""]
+    if demo:
+        lines.append("*Demo mode: sources below are fictional data, for trial only.*")
+        lines.append("")
     for m in messages:
         lines.append(f"## {'You' if m['role'] == 'user' else 'Sidekick'}")
         lines.append(m["text"])
@@ -397,42 +402,435 @@ def _build_enterprise_index(source: str):
             st.error(f"Failed: {e}")
 
 
+def _build_demo_index() -> bool:
+    """Build the demo corpora (Meridian + Confluence mock) in the UI —
+    the same path as `python -m rag_demo.ingest`, minus the terminal
+    (Phase 4, U1+U2). Returns True when both indexes built; on failure
+    the on-disk index (and cache) is left untouched, like the
+    enterprise build above. Skips an index that already exists."""
+    from rag_demo.ingest import build_index
+    from rag_demo.sources import MarkdownDirectorySource, MockConfluenceSource
+    from rag_demo.preflight import index_present
+
+    settings = get_settings()
+    demo_sources = [
+        ("meridian", MarkdownDirectorySource(settings.docs_dir)),
+        ("confluence-mock", MockConfluenceSource()),
+    ]
+    with st.status("Building demo indexes…", expanded=True) as status:
+        for source_key, src in demo_sources:
+            index_dir = settings.index_dir.parent / INDEX_DIRS[source_key]
+            if index_present(index_dir):
+                st.write(f"{source_key}: index already exists — skipping.")
+                continue
+            st.write(f"Indexing {source_key}…")
+            build_settings = get_settings()
+            build_settings.index_dir = index_dir
+            try:
+                store = build_index(build_settings, src)
+            except Exception as e:
+                status.update(label="❌ Demo index build failed", state="error")
+                st.error(f"Failed building {source_key}: {e}")
+                return False
+            if store:
+                st.write(f"{source_key}: indexed {store.index.ntotal} chunks.")
+            else:
+                st.warning(f"{source_key}: no documents indexed.")
+        status.update(label="✅ Demo indexes ready", state="complete")
+    # A rebuild in place must not leave the cached retriever serving
+    # the old index (see caching.py invalidation contract).
+    from rag_demo.caching import clear_cache
+
+    clear_cache()
+    st.success("✅ Demo indexes built. Chat input is now enabled.")
+    return True
+
+
 with st.sidebar:
     st.header("📚 Sidekick")
-    corpus_options = [c for c in SOURCES if c in CORPUS_LABELS]
-    if st.session_state.get("upload_retriever") is not None:
-        corpus_options.append("upload")
-        CORPUS_LABELS["upload"] = (
-            f"Uploaded: {st.session_state.get('upload_name', 'file')}"
-        )
-    default_corpus = st.session_state.pop("corpus_override", "meridian")
-    if default_corpus not in corpus_options:
-        default_corpus = "meridian"
-    corpus = st.radio(
-        "Corpus",
-        options=corpus_options,
-        format_func=lambda c: CORPUS_LABELS.get(c, c),
-        index=corpus_options.index(default_corpus),
-        help="Build an index first: python -m rag_demo.ingest --source <name>",
-        key="corpus-selector",
+    # --- Mode switch: one visible control, always on top ---
+    # "Connected" = a workspace source with a built index on disk
+    # (see modes.py: credentials alone do not count).
+    _connected = connected_sources(settings.index_dir.parent, INDEX_DIRS)
+    if "mode-selector" not in st.session_state:
+        st.session_state["mode-selector"] = default_mode(_connected)
+    app_mode = st.radio(
+        "Mode",
+        options=["demo", "workspace"],
+        format_func=lambda m: (
+            "🎭 Demo (fictional data)" if m == "demo" else "💼 Workspace"
+        ),
+        key="mode-selector",
+        help="Demo serves fictional data for trial. Workspace serves your own sources.",
+    )
+    if app_mode == "demo":
+        st.caption("🎭 Demo mode: all data here is fictional, for trial only.")
+    else:
+        st.caption("💼 Workspace: your own documentation and enterprise sources.")
+    # Switching mode resets the source picker to that mode's first
+    # option — otherwise the old mode's corpus would linger as a stale
+    # widget value that is not in the new mode's options.
+    _prev_mode = st.session_state.get("_prev_mode")
+    if _prev_mode is not None and _prev_mode != app_mode:
+        st.session_state.pop("corpus-selector", None)
+    st.session_state["_prev_mode"] = app_mode
+
+    tab_chat, tab_sources, tab_settings = st.tabs(
+        ["💬 Chat", "📚 Sources", "⚙️ Settings"]
     )
 
-    # Agentic mode toggle (ReAct: Thought → Action → Observation).
-    agentic_mode = st.toggle(
-        "🤖 Agentic mode",
-        value=st.session_state.get("agentic_mode", False),
-        help="Multi-step reasoning: plans searches, executes tools, verifies, refines.",
-        key="agentic-toggle",
-    )
-    st.session_state["agentic_mode"] = agentic_mode
-    if agentic_mode:
-        show_plan = st.toggle(
-            "Show plan before executing",
-            value=st.session_state.get("agentic_show_plan", True),
-            help="Display the agent's plan as a flowchart for approval.",
-            key="agentic-show-plan",
+    with tab_chat:
+        # Agentic mode toggle (ReAct: Thought → Action → Observation).
+        agentic_mode = st.toggle(
+            "🤖 Agentic mode",
+            value=st.session_state.get("agentic_mode", False),
+            help="Multi-step reasoning: plans searches, executes tools, verifies, refines.",
+            key="agentic-toggle",
         )
-        st.session_state["agentic_show_plan"] = show_plan
+        st.session_state["agentic_mode"] = agentic_mode
+        if agentic_mode:
+            show_plan = st.toggle(
+                "Show plan before executing",
+                value=st.session_state.get("agentic_show_plan", True),
+                help="Display the agent's plan as a flowchart for approval.",
+                key="agentic-show-plan",
+            )
+            st.session_state["agentic_show_plan"] = show_plan
+
+        st.subheader("Session")
+        user_groups = st.text_input(
+            "Your groups (comma-separated)",
+            value=",".join(settings.user_groups),
+            help="Permission-aware retrieval demo: try 'eng-all' vs 'eng-leads' on the Confluence corpus.",
+        )
+        groups = [g.strip() for g in user_groups.split(",") if g.strip()]
+        if st.button("➕ New chat", use_container_width=True):
+            _persist_active_chat()
+            _chat = new_chat()
+            st.session_state.active_chat_id = _chat["id"]
+            st.session_state.messages = []
+            st.session_state.history = []
+            # Explicitly set the radio widget to the new chat (not just clear it)
+            # to prevent stale selection from reloading old messages on next rerun.
+            st.session_state["chat-selector"] = _chat["id"]
+            st.rerun()
+
+        st.subheader("💬 Chats")
+        _chat_list = list_chats()
+        if _chat_list:
+            _labels = {c["id"]: c["title"] for c in _chat_list}
+            _ids = [c["id"] for c in _chat_list]
+            _cur = st.session_state.get("active_chat_id")
+            _idx = _ids.index(_cur) if _cur in _ids else 0
+            _picked = st.radio(
+                "Conversations",
+                options=_ids,
+                format_func=lambda cid: _labels.get(cid, cid),
+                index=_idx,
+                label_visibility="collapsed",
+                key="chat-selector",
+            )
+            if _picked != st.session_state.get("active_chat_id"):
+                _persist_active_chat()
+                st.session_state.active_chat_id = _picked
+                _loaded = load_chat(_picked) or {"messages": [], "history": []}
+                st.session_state.messages = _loaded.get("messages", [])
+                st.session_state.history = _loaded.get("history", [])
+                st.rerun()
+            with st.expander("✏️ Rename / delete"):
+                _new_title = st.text_input(
+                    "Title",
+                    value=_labels.get(st.session_state.active_chat_id, ""),
+                    key="chat-rename",
+                )
+                _rc1, _rc2 = st.columns(2)
+                with _rc1:
+                    if st.button("Rename", use_container_width=True):
+                        rename_chat(
+                            st.session_state.active_chat_id, _new_title or "Untitled"
+                        )
+                        st.rerun()
+                with _rc2:
+                    if st.button("🗑️ Delete", use_container_width=True):
+                        delete_chat(st.session_state.active_chat_id)
+                        _remaining = list_chats()
+                        if _remaining:
+                            st.session_state.active_chat_id = _remaining[0]["id"]
+                            _loaded = load_chat(_remaining[0]["id"]) or {}
+                            st.session_state.messages = _loaded.get("messages", [])
+                            st.session_state.history = _loaded.get("history", [])
+                        else:
+                            _chat = new_chat()
+                            st.session_state.active_chat_id = _chat["id"]
+                            st.session_state.messages = []
+                            st.session_state.history = []
+                        # Explicitly sync the radio widget to prevent stale selection.
+                        st.session_state["chat-selector"] = st.session_state.active_chat_id
+                        st.rerun()
+        _search = st.text_input("🔍 Search chat", key="chat-search")
+        if st.session_state.get("messages"):
+            st.download_button(
+                "📥 Export chat",
+                data=_chat_markdown(
+                    st.session_state.messages, demo=(app_mode == "demo")
+                ),
+                file_name="sidekick-chat.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+
+    with tab_sources:
+        st.subheader("📚 Sources")
+        if app_mode == "demo":
+            # Demo mode: fictional corpora only, never a workspace source.
+            st.caption(
+                "🎭 Fictional demo data — for trial only, not real company data."
+            )
+            if st.button(
+                "🔨 Build demo index",
+                key="build_demo_index",
+                help="Build the Meridian + Confluence mock demo indexes inside the app — no terminal needed. Chat input enables automatically when the build finishes.",
+            ):
+                if _build_demo_index():
+                    st.rerun()
+            for _src in DEMO_CORPORA:
+                _dir = settings.index_dir.parent / INDEX_DIRS[_src]
+                st.caption(f"{CORPUS_DISPLAY[_src]} — {source_status(_dir.exists())}")
+            mode_options = [c for c in DEMO_CORPORA if c in SOURCES]
+        else:
+            # Workspace mode: Documentation + Your workspace. The
+            # workspace path never shows a demo corpus.
+            st.subheader("Documentation")
+            st.caption(
+                "Public docs. GitHub repo docs are this repo "
+                "(sidekick-rag-assistant) itself; the repo indexed comes from "
+                "RAG_DEMO_GITHUB_REPO."
+            )
+            st.subheader("Your workspace")
+            for _src in WORKSPACE_ENTERPRISE_SOURCES:
+                _dir = settings.index_dir.parent / INDEX_DIRS[_src]
+                _line = f"{CORPUS_DISPLAY[_src]} — {source_status(_dir.exists())}"
+                if not _dir.exists():
+                    _line += " (set up below)"
+                st.caption(_line)
+            mode_options = [c for c in WORKSPACE_CORPORA if c in SOURCES]
+        if st.session_state.get("upload_retriever") is not None:
+            mode_options.append("upload")
+            CORPUS_DISPLAY["upload"] = (
+                f"Uploaded: {st.session_state.get('upload_name', 'file')}"
+            )
+        _default_corpus = st.session_state.pop("corpus_override", None)
+        if _default_corpus not in mode_options:
+            _default_corpus = mode_options[0]
+        corpus = st.radio(
+            "Demo corpus" if app_mode == "demo" else "Source",
+            options=mode_options,
+            format_func=lambda c: (
+                CORPUS_DISPLAY.get(c, c)
+                + (
+                    f" — {source_status((settings.index_dir.parent / INDEX_DIRS[c]).exists())}"
+                    if c in WORKSPACE_ENTERPRISE_SOURCES
+                    else ""
+                )
+            ),
+            index=mode_options.index(_default_corpus),
+            help="Build an index first: python -m rag_demo.ingest --source <name>",
+            key="corpus-selector",
+        )
+
+        if app_mode == "workspace":
+            # Enterprise connectors: PAT/token configuration + index building.
+            # Tokens are kept in session state (in-memory only, cleared on restart).
+            with st.expander("🔌 Enterprise Connectors", expanded=False):
+                st.caption("⚠️ Tokens are stored in-memory only and cleared on restart. Never commit them.")
+                _enterprise_ui()
+
+        st.subheader("📎 Upload a document")
+        uploaded = st.file_uploader(
+            "PDF, DOCX, TXT, MD, or CSV",
+            type=["pdf", "docx", "txt", "md", "csv"],
+            help="Extracted in memory only — nothing is written to disk or committed.",
+        )
+        if uploaded is not None:
+            import os
+
+            max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
+            if uploaded.size > max_mb * 1024 * 1024:
+                st.error(f"File too large (over {max_mb:.0f} MB).")
+            elif st.session_state.get("upload_name") != uploaded.name:
+                from rag_demo.extract import UnsupportedFormat, extract_text
+
+                data = uploaded.read()
+                try:
+                    text = extract_text(uploaded.name, data)
+                except UnsupportedFormat as e:
+                    st.error(str(e))
+                except Exception as e:  # noqa: BLE001 — corrupt/encrypted files
+                    st.error(f"Couldn't read {uploaded.name}: {e}")
+                else:
+                    ocr_used = False
+                    if not text.strip() and uploaded.name.lower().endswith(".pdf"):
+                        from rag_demo.ocr import ocr_available, ocr_pdf
+
+                        if ocr_available():
+                            with st.spinner("No embedded text — running OCR…"):
+                                try:
+                                    text = ocr_pdf(data)
+                                    ocr_used = bool(text.strip())
+                                except RuntimeError as e:
+                                    st.warning(str(e))
+                    if not text.strip():
+                        st.warning(
+                            f"No text found in {uploaded.name}. It's likely a scanned "
+                            "PDF — install OCR support (conda install -c conda-forge "
+                            "tesseract poppler), or copy the text into a .txt file."
+                        )
+                    else:
+                        st.session_state.upload_name = uploaded.name
+                        st.session_state.upload_text = text
+                        st.session_state.upload_summary = None
+                        st.session_state.upload_retriever = None
+                        msg = f"Extracted {len(text):,} characters from {uploaded.name}."
+                        if ocr_used:
+                            msg += " (via OCR — may contain recognition errors)"
+                        st.success(msg)
+        if st.session_state.get("upload_text"):
+            if st.button("📝 Summarize", use_container_width=True):
+                from rag_demo.summarize import summarize
+
+                with st.spinner("Summarizing…"):
+                    try:
+                        result = summarize(
+                            st.session_state.upload_text, settings
+                        )
+                        if not result or not result.strip():
+                            st.error("Summarize returned empty — check the terminal for errors.")
+                        else:
+                            st.session_state.upload_summary = result
+                    except Exception as e:
+                        st.error(f"Summarize failed: {type(e).__name__}: {e}")
+                        # Also print to terminal for debugging
+                        print(f"[summarize] FAILED: {type(e).__name__}: {e}")
+            if st.button("💬 Chat with this file", use_container_width=True,
+                           help="Index this file and switch the chatbot to answer from it"):
+                from langchain_community.vectorstores import FAISS
+                from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+                from rag_demo.retriever import Retriever
+
+                with st.spinner(f"Indexing {st.session_state.upload_name}…"):
+                    splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
+                    )
+                    chunks = splitter.split_text(st.session_state.upload_text)
+                    source_name = f"upload:{st.session_state.upload_name}"
+                    store = FAISS.from_texts(
+                        chunks,
+                        get_embeddings(settings),
+                        metadatas=[
+                            {"source": source_name, "allowed_groups": ["*"]} for _ in chunks
+                        ],
+                    )
+                    chunk_dicts = [
+                        {"text": c, "source": source_name, "allowed_groups": ["*"]}
+                        for c in chunks
+                    ]
+                    st.session_state.upload_retriever = Retriever(
+                        settings, store=store, chunks=chunk_dicts
+                    )
+                    st.session_state.corpus_override = "upload"
+                    # Explicitly sync the corpus radio widget.
+                    st.session_state["corpus-selector"] = "upload"
+                st.success(
+                    f"Now chatting with **{st.session_state.upload_name}** "
+                    f"({len(chunks)} chunks). Ask anything about it below. "
+                    "Use the Sources tab to switch back."
+                )
+                st.rerun()
+            if st.button("🗑️ Clear upload", use_container_width=True):
+                for key in (
+                    "upload_name",
+                    "upload_text",
+                    "upload_summary",
+                    "upload_retriever",
+                    "corpus_override",
+                ):
+                    st.session_state.pop(key, None)
+                st.rerun()
+
+    # --- Post-selection: the selected corpus drives the index dir, and
+    # the pre-flight result drives chat readiness (U3). Computed once
+    # per rerun, before the Settings tab renders (tab order on screen
+    # follows declaration, not render order).
+    upload_retriever = (
+        st.session_state.get("upload_retriever") if corpus == "upload" else None
+    )
+    if corpus != "meridian" and corpus != "upload":
+        settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
+    preflight = run_preflight(settings, corpus, settings.index_dir)
+    chat_ready = preflight.all_ok or upload_retriever is not None
+
+    with tab_settings:
+        st.subheader("⚙️ Settings")
+        # Retrieval toggles (Phase 3 defaults, Phase 4 UI). Wired to the
+        # Phase 1 cache-invalidation contract: retrieval and rerank are
+        # part of the cached-Retriever key, so changing either yields a
+        # fresh retriever automatically — no stale index can be served.
+        # The widget values persist in session state across reruns; the
+        # first render seeds them from settings (env overrides intact).
+        if "settings-retrieval" not in st.session_state:
+            st.session_state["settings-retrieval"] = settings.retrieval
+        settings.retrieval = st.selectbox(
+            "Retrieval mode",
+            options=["hybrid", "dense"],
+            key="settings-retrieval",
+            help="Hybrid runs BM25 + dense and fuses ranks (default). Dense is pure vector search.",
+        )
+        if "settings-rerank" not in st.session_state:
+            st.session_state["settings-rerank"] = settings.rerank_enabled
+        settings.rerank_enabled = st.checkbox(
+            "Rerank results (cross-encoder)",
+            key="settings-rerank",
+            disabled=settings.fake,
+            help="Re-scores the top candidates for finer ranking. Downloads a small model on first use; disabled under RAG_DEMO_FAKE=1 so tests never touch torch.",
+        )
+        settings.hybrid_fallback = st.checkbox(
+            "🌐 General-knowledge fallback",
+            value=settings.hybrid_fallback,
+            help="When the corpus has no answer, fall back to the LLM's general "
+            "knowledge — clearly marked, never silently mixed with citations. "
+            "Off = strict corpus-only (says 'I don't know').",
+        )
+
+        st.subheader("Engine")
+        st.markdown(
+            f"**LLM** `{settings.ollama_model if settings.llm_provider == 'ollama' else settings.llm_provider}`  \n"
+            f"**Embeddings** `{settings.embedding_provider}`  \n"
+            f"**Retrieval** `{settings.retrieval}`"
+            + (" + rerank" if settings.rerank_enabled else "")
+        )
+        st.caption(
+            "Model is set via RAG_DEMO_MODEL (default qwen3:8b); "
+            "there is no in-app model switcher yet."
+        )
+        if settings.fake or settings.llm_provider != "ollama":
+            st.caption("🎭 Fake LLM (RAG_DEMO_FAKE=1)")
+
+        st.subheader("Diagnostics")
+        st.caption(
+            "🟢 Ollama connected" if preflight.ollama_ok
+            else "🔴 Ollama unreachable — start it with `ollama serve`"
+        )
+        st.caption(
+            f"🤖 Model `{settings.ollama_model}` present" if preflight.model_ok
+            else f"🤖 Model `{settings.ollama_model}` missing — run `ollama pull {settings.ollama_model}`"
+        )
+        st.caption(
+            f"📚 Index for '{corpus}' present" if preflight.index_ok
+            else f"📚 Index for '{corpus}' missing — build it from the Sources tab"
+        )
+
+        st.subheader("Web search")
         # Tavily API key for reliable web search.
         tavily_key = st.text_input(
             "Tavily API key",
@@ -505,150 +903,14 @@ with st.sidebar:
                 st.success(f"✅ Cleared {n} cached result(s)")
             except Exception:
                 st.info("Cache is empty")
+        if st.button("🗑️ Clear model/index cache", key="clear_model_cache",
+                     help="Drop cached embeddings, retrievers, and episodic memory (Phase 1). Next question rebuilds them."):
+            from rag_demo.caching import clear_cache
 
-    # Enterprise connectors: PAT/token configuration + index building.
-    # Tokens are kept in session state (in-memory only, cleared on restart).
-    with st.expander("🔌 Enterprise Connectors", expanded=False):
-        st.caption("⚠️ Tokens are stored in-memory only and cleared on restart. Never commit them.")
-        _enterprise_ui()
+            clear_cache()
+            st.success("✅ Cleared cached models and indexes")
 
-    upload_retriever = (
-        st.session_state.get("upload_retriever") if corpus == "upload" else None
-    )
-    if corpus != "meridian" and corpus != "upload":
-        settings.index_dir = settings.index_dir.parent / INDEX_DIRS[corpus]
-
-    # Prominent context indicator — always visible so the user knows
-    # exactly what the assistant is answering from.
-    _corpus_descriptions = {
-        "meridian": "📚 **Meridian docs** — logistics API, deployment, security",
-        "playwright-docs": "🎭 **Playwright docs** — browser automation",
-        "confluence-mock": "📝 **Confluence mock** — simulated wiki pages",
-        "github-docs": "🐙 **GitHub docs** — repository markdown files",
-        "confluence": "📝 **Confluence** — real wiki pages",
-        "jira": "🎫 **Jira** — issues and tickets",
-        "outlook": "📧 **Outlook** — emails",
-        "aws-s3": "☁️ **AWS S3** — bucket documents",
-    }
-    if corpus == "upload":
-        _ctx_label = (
-            f"📄 **Uploaded file: {st.session_state.get('upload_name', 'file')}** — "
-            "answers come from this file only"
-        )
-    else:
-        _ctx_label = _corpus_descriptions.get(corpus, f"📚 **{corpus}**")
-    st.info(
-        f"{_ctx_label} · "
-        "Change the **Corpus** selector in the sidebar to switch context.",
-        icon="🧭",
-    )
-
-    st.divider()
-    st.subheader("Session")
-    user_groups = st.text_input(
-        "Your groups (comma-separated)",
-        value=",".join(settings.user_groups),
-        help="Permission-aware retrieval demo: try 'eng-all' vs 'eng-leads' on the Confluence corpus.",
-    )
-    groups = [g.strip() for g in user_groups.split(",") if g.strip()]
-    if st.button("➕ New chat", use_container_width=True):
-        _persist_active_chat()
-        _chat = new_chat()
-        st.session_state.active_chat_id = _chat["id"]
-        st.session_state.messages = []
-        st.session_state.history = []
-        # Explicitly set the radio widget to the new chat (not just clear it)
-        # to prevent stale selection from reloading old messages on next rerun.
-        st.session_state["chat-selector"] = _chat["id"]
-        st.rerun()
-
-    st.divider()
-    st.subheader("💬 Chats")
-    _chat_list = list_chats()
-    if _chat_list:
-        _labels = {c["id"]: c["title"] for c in _chat_list}
-        _ids = [c["id"] for c in _chat_list]
-        _cur = st.session_state.get("active_chat_id")
-        _idx = _ids.index(_cur) if _cur in _ids else 0
-        _picked = st.radio(
-            "Conversations",
-            options=_ids,
-            format_func=lambda cid: _labels.get(cid, cid),
-            index=_idx,
-            label_visibility="collapsed",
-            key="chat-selector",
-        )
-        if _picked != st.session_state.get("active_chat_id"):
-            _persist_active_chat()
-            st.session_state.active_chat_id = _picked
-            _loaded = load_chat(_picked) or {"messages": [], "history": []}
-            st.session_state.messages = _loaded.get("messages", [])
-            st.session_state.history = _loaded.get("history", [])
-            st.rerun()
-        with st.expander("✏️ Rename / delete"):
-            _new_title = st.text_input(
-                "Title",
-                value=_labels.get(st.session_state.active_chat_id, ""),
-                key="chat-rename",
-            )
-            _rc1, _rc2 = st.columns(2)
-            with _rc1:
-                if st.button("Rename", use_container_width=True):
-                    rename_chat(
-                        st.session_state.active_chat_id, _new_title or "Untitled"
-                    )
-                    st.rerun()
-            with _rc2:
-                if st.button("🗑️ Delete", use_container_width=True):
-                    delete_chat(st.session_state.active_chat_id)
-                    _remaining = list_chats()
-                    if _remaining:
-                        st.session_state.active_chat_id = _remaining[0]["id"]
-                        _loaded = load_chat(_remaining[0]["id"]) or {}
-                        st.session_state.messages = _loaded.get("messages", [])
-                        st.session_state.history = _loaded.get("history", [])
-                    else:
-                        _chat = new_chat()
-                        st.session_state.active_chat_id = _chat["id"]
-                        st.session_state.messages = []
-                        st.session_state.history = []
-                    # Explicitly sync the radio widget to prevent stale selection.
-                    st.session_state["chat-selector"] = st.session_state.active_chat_id
-                    st.rerun()
-    _search = st.text_input("🔍 Search chat", key="chat-search")
-    if st.session_state.get("messages"):
-        st.download_button(
-            "📥 Export chat",
-            data=_chat_markdown(st.session_state.messages),
-            file_name="sidekick-chat.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
-
-    st.divider()
-    st.subheader("Engine")
-    st.markdown(
-        f"**LLM** `{settings.ollama_model if settings.llm_provider == 'ollama' else settings.llm_provider}`  \n"
-        f"**Embeddings** `{settings.embedding_provider}`  \n"
-        f"**Retrieval** `{settings.retrieval}`"
-        + (" + rerank" if settings.rerank_enabled else "")
-    )
-    if settings.fake or settings.llm_provider != "ollama":
-        st.caption("🎭 Fake LLM (RAG_DEMO_FAKE=1)")
-    elif _ollama_reachable(settings.ollama_base_url):
-        st.caption("🟢 Ollama connected")
-    else:
-        st.caption("🔴 Ollama unreachable — start it with `ollama serve`")
-    settings.hybrid_fallback = st.checkbox(
-        "🌐 General-knowledge fallback",
-        value=settings.hybrid_fallback,
-        help="When the corpus has no answer, fall back to the LLM's general "
-        "knowledge — clearly marked, never silently mixed with citations. "
-        "Off = strict corpus-only (says 'I don't know').",
-    )
-
-    st.divider()
-    with st.expander("🧪 Regression prompts"):
+        st.subheader("🧪 Regression prompts")
         st.caption(
             "Standard prompts through the full pipeline, with live checks. "
             "Targets the Meridian demo corpus."
@@ -666,120 +928,6 @@ with st.sidebar:
                 st.session_state.pending_question = _case["question"]
                 st.session_state.pending_case = _case
                 st.rerun()
-
-    st.divider()
-    st.subheader("📎 Upload a document")
-    uploaded = st.file_uploader(
-        "PDF, DOCX, TXT, MD, or CSV",
-        type=["pdf", "docx", "txt", "md", "csv"],
-        help="Extracted in memory only — nothing is written to disk or committed.",
-    )
-    if uploaded is not None:
-        import os
-
-        max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
-        if uploaded.size > max_mb * 1024 * 1024:
-            st.error(f"File too large (over {max_mb:.0f} MB).")
-        elif st.session_state.get("upload_name") != uploaded.name:
-            from rag_demo.extract import UnsupportedFormat, extract_text
-
-            data = uploaded.read()
-            try:
-                text = extract_text(uploaded.name, data)
-            except UnsupportedFormat as e:
-                st.error(str(e))
-            except Exception as e:  # noqa: BLE001 — corrupt/encrypted files
-                st.error(f"Couldn't read {uploaded.name}: {e}")
-            else:
-                ocr_used = False
-                if not text.strip() and uploaded.name.lower().endswith(".pdf"):
-                    from rag_demo.ocr import ocr_available, ocr_pdf
-
-                    if ocr_available():
-                        with st.spinner("No embedded text — running OCR…"):
-                            try:
-                                text = ocr_pdf(data)
-                                ocr_used = bool(text.strip())
-                            except RuntimeError as e:
-                                st.warning(str(e))
-                if not text.strip():
-                    st.warning(
-                        f"No text found in {uploaded.name}. It's likely a scanned "
-                        "PDF — install OCR support (conda install -c conda-forge "
-                        "tesseract poppler), or copy the text into a .txt file."
-                    )
-                else:
-                    st.session_state.upload_name = uploaded.name
-                    st.session_state.upload_text = text
-                    st.session_state.upload_summary = None
-                    st.session_state.upload_retriever = None
-                    msg = f"Extracted {len(text):,} characters from {uploaded.name}."
-                    if ocr_used:
-                        msg += " (via OCR — may contain recognition errors)"
-                    st.success(msg)
-    if st.session_state.get("upload_text"):
-        if st.button("📝 Summarize", use_container_width=True):
-            from rag_demo.summarize import summarize
-
-            with st.spinner("Summarizing…"):
-                try:
-                    result = summarize(
-                        st.session_state.upload_text, settings
-                    )
-                    if not result or not result.strip():
-                        st.error("Summarize returned empty — check the terminal for errors.")
-                    else:
-                        st.session_state.upload_summary = result
-                except Exception as e:
-                    st.error(f"Summarize failed: {type(e).__name__}: {e}")
-                    # Also print to terminal for debugging
-                    print(f"[summarize] FAILED: {type(e).__name__}: {e}")
-        if st.button("💬 Chat with this file", use_container_width=True,
-                       help="Index this file and switch the chatbot to answer from it"):
-            from langchain_community.vectorstores import FAISS
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-            from rag_demo.retriever import Retriever
-
-            with st.spinner(f"Indexing {st.session_state.upload_name}…"):
-                splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
-                )
-                chunks = splitter.split_text(st.session_state.upload_text)
-                source_name = f"upload:{st.session_state.upload_name}"
-                store = FAISS.from_texts(
-                    chunks,
-                    get_embeddings(settings),
-                    metadatas=[
-                        {"source": source_name, "allowed_groups": ["*"]} for _ in chunks
-                    ],
-                )
-                chunk_dicts = [
-                    {"text": c, "source": source_name, "allowed_groups": ["*"]}
-                    for c in chunks
-                ]
-                st.session_state.upload_retriever = Retriever(
-                    settings, store=store, chunks=chunk_dicts
-                )
-                st.session_state.corpus_override = "upload"
-                # Explicitly sync the corpus radio widget.
-                st.session_state["corpus-selector"] = "upload"
-            st.success(
-                f"Now chatting with **{st.session_state.upload_name}** "
-                f"({len(chunks)} chunks). Ask anything about it below. "
-                "Use the Corpus selector to switch back."
-            )
-            st.rerun()
-        if st.button("🗑️ Clear upload", use_container_width=True):
-            for key in (
-                "upload_name",
-                "upload_text",
-                "upload_summary",
-                "upload_retriever",
-                "corpus_override",
-            ):
-                st.session_state.pop(key, None)
-            st.rerun()
 
 # ------------------------------------------------------------------ state ---
 # Per-chat state: the active chat file is the source of truth; session state
@@ -813,8 +961,46 @@ if active_retriever is None and index_ok:
     except Exception:
         active_retriever = None
 
+# ------------------------------------------- context + pre-flight banners ---
+# Phase 4 (U1+U2+U3): the always-on context indicator moved out of the
+# sidebar so it sits above the chat, next to the persistent Demo-mode
+# fictional marking and the pre-flight fix-it banner. `preflight` and
+# `chat_ready` come from the sidebar's post-selection section.
+if app_mode == "demo":
+    st.warning(
+        "🎭 Demo mode — answers come from fictional demo data, for trial only. "
+        "Switch to Workspace in the sidebar for your own sources.",
+        icon="🎭",
+    )
+_corpus_descriptions = {
+    "meridian": "📚 **Meridian docs (fictional demo)** — logistics API, deployment, security",
+    "playwright-docs": "🎭 **Playwright docs** — browser automation",
+    "confluence-mock": "📝 **Confluence mock (fictional demo)** — simulated wiki pages",
+    "github-docs": "🐙 **GitHub repo docs (sidekick-rag-assistant)** — repository markdown files",
+    "confluence": "📝 **Confluence** — real wiki pages",
+    "jira": "🎫 **Jira** — issues and tickets",
+    "outlook": "📧 **Outlook** — emails",
+    "aws-s3": "☁️ **AWS S3** — bucket documents",
+}
+if corpus == "upload":
+    _ctx_label = (
+        f"📄 **Uploaded file: {st.session_state.get('upload_name', 'file')}** — "
+        "answers come from this file only"
+    )
+else:
+    _ctx_label = _corpus_descriptions.get(corpus, f"📚 **{corpus}**")
+st.info(
+    f"{_ctx_label} · "
+    "Change the **Mode** or source in the sidebar's Sources tab to switch context.",
+    icon="🧭",
+)
+if not chat_ready:
+    st.error("Chat is disabled until the items below are fixed:")
+    for _problem in preflight.problems:
+        st.markdown(f"- {_problem}")
+
 # ------------------------------------------------------- regression run-all ---
-if st.session_state.pop("reg_run_all", False) and index_ok:
+if st.session_state.pop("reg_run_all", False) and chat_ready:
     _cases = _load_regression_cases()
     _results: list[dict] = []
     _progress = st.progress(0, text="Running regression suite…")
@@ -895,11 +1081,8 @@ if not st.session_state.messages:
 """,
         unsafe_allow_html=True,
     )
-    if not index_ok:
-        st.warning(
-            f"No index at `{settings.index_dir}`. Build it first:\n\n"
-            "`PYTHONPATH=src python -m rag_demo.ingest --source " + corpus + "`"
-        )
+    # No index warning here: the pre-flight fix-it banner above covers
+    # it (and the Sources tab's Build demo index button fixes it).
     st.write("Try one of these:")
     _sugs = SUGGESTIONS.get(corpus, [])
     for _row in range(0, len(_sugs), 2):
@@ -933,6 +1116,7 @@ for msg in st.session_state.messages:
                 f'<span class="citation-pill">{s}</span>' for s in msg["sources"]
             )
             st.markdown(pills, unsafe_allow_html=True)
+            _demo_sources_caption(app_mode == "demo")
         if msg.get("latency_ms") is not None:
             st.caption(
                 f"⚡ {msg['latency_ms']/1000:.1f}s · {len(msg.get('hits', []))} passages"
@@ -960,7 +1144,7 @@ for msg in st.session_state.messages:
 
 # ------------------------------------------------------------------ chat ---
 question = st.session_state.pop("pending_question", None) or st.chat_input(
-    "Ask anything…", disabled=not index_ok
+    "Ask anything…", disabled=not chat_ready
 )
 reg_case = st.session_state.pop("pending_case", None)
 
@@ -968,7 +1152,7 @@ reg_case = st.session_state.pop("pending_case", None)
 # This must come before the `if question` block because clicking
 # Execute/Cancel triggers a rerun where `question` is None.
 agentic_pending = st.session_state.get("agentic_pending")
-if agentic_pending and index_ok:
+if agentic_pending and chat_ready:
     from rag_demo.agent import format_plan_as_ascii, stream_agentic_ask
 
     pending_q = agentic_pending["question"]
@@ -1016,6 +1200,7 @@ if agentic_pending and index_ok:
                 status.update(label="✅ Done", state="complete")
 
             st.markdown(answer.text)
+            _demo_sources_caption(app_mode == "demo")
             if answer.sources:
                 with st.expander("Sources"):
                     for s in answer.sources:
@@ -1047,7 +1232,7 @@ if agentic_pending and index_ok:
         st.info("Review the plan above, then click Execute.")
         st.stop()
 
-if question and index_ok:
+if question and chat_ready:
     # Regression runs use the case's canned history (e.g. the follow-up case).
     ask_history = (
         [tuple(h) for h in reg_case.get("history", [])]
@@ -1126,6 +1311,7 @@ if question and index_ok:
                 status.update(label="✅ Done", state="complete")
 
             st.markdown(answer.text)
+            _demo_sources_caption(app_mode == "demo")
             if answer.sources:
                 with st.expander("Sources"):
                     for s in answer.sources:
@@ -1178,6 +1364,7 @@ if question and index_ok:
                 f'<span class="citation-pill">{s}</span>' for s in answer.sources
             )
             st.markdown(pills, unsafe_allow_html=True)
+            _demo_sources_caption(app_mode == "demo")
         if answer.latency_ms is not None:
             st.caption(
                 f"⚡ {answer.latency_ms/1000:.1f}s · {len(answer.hits)} passages"
