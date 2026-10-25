@@ -53,8 +53,8 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 |---|---|---|
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local, no key) | `RAG_DEMO_EMBEDDINGS=fake` |
 | LLM | Ollama `qwen3:8b` at `localhost:11434` | `RAG_DEMO_MODEL`, `RAG_DEMO_BASE_URL` |
-| Retrieval | dense vector search, `top_k=4` | `RAG_DEMO_RETRIEVAL=hybrid` (BM25+dense) |
-| Rerank | off | `RAG_DEMO_RERANK=1` (cross-encoder, downloads once) |
+| Retrieval | hybrid (BM25+dense), `top_k=8` | `RAG_DEMO_RETRIEVAL=dense` (pure vector search) |
+| Rerank | on (off under `RAG_DEMO_FAKE=1`) | `RAG_DEMO_RERANK=0` to disable (cross-encoder, downloads once) |
 | Session cache | embeddings + FAISS retriever + episodic memory, built once per session | `RAG_DEMO_NO_CACHE=1` (bypass) |
 | Agentic budget | 4 iterations, 300s wall-clock | `RAG_DEMO_AGENT_MAX_ITERATIONS`, `RAG_DEMO_AGENT_BUDGET_SECONDS` |
 | Web search (agentic) | DuckDuckGo scraping (unreliable) | `RAG_DEMO_TAVILY_API_KEY` (recommended) |
@@ -274,7 +274,7 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── enterprise.py        # real Confluence / Jira / Outlook / AWS S3 connectors
 │   ├── ingest.py            # source → chunks → FAISS (+ --incremental, per-source indexes)
 │   ├── retriever.py         # dense / hybrid (BM25+RRF) + ACL filtering
-│   ├── rerank.py            # cross-encoder reranking (opt-in)
+│   ├── rerank.py            # cross-encoder reranking (on by default)
 │   ├── rewrite.py           # multi-turn query rewriting
 │   ├── chain.py             # RAG chain with citations (+ streaming)
 │   ├── caching.py           # per-session cache: embeddings, retriever, episodic memory

@@ -976,3 +976,40 @@ def test_stream_agentic_ask_yields_tokens_then_answer(_indexed):
     assert len(answers) == 1
     assert answers[0].text == "".join(tokens)
     assert answers[0].sources
+
+
+def test_phase3_default_pipeline(monkeypatch):
+    """Phase 3 (A1): defaults are hybrid retrieval, top_k=8, rerank on.
+
+    Env overrides still win exactly as before, and under RAG_DEMO_FAKE=1
+    the rerank default stays off so the fake tier never touches
+    sentence_transformers/torch.
+    """
+    from rag_demo.config import Settings
+
+    # Real (non-fake) defaults: all three override envs unset.
+    monkeypatch.delenv("RAG_DEMO_FAKE", raising=False)
+    monkeypatch.delenv("RAG_DEMO_RETRIEVAL", raising=False)
+    monkeypatch.delenv("RAG_DEMO_RERANK", raising=False)
+    s = Settings()
+    assert s.retrieval == "hybrid"
+    assert s.top_k == 8
+    assert s.rerank_enabled is True
+
+    # Explicit env overrides still win exactly as before.
+    monkeypatch.setenv("RAG_DEMO_RETRIEVAL", "dense")
+    monkeypatch.setenv("RAG_DEMO_RERANK", "0")
+    s = Settings()
+    assert s.retrieval == "dense"
+    assert s.rerank_enabled is False
+
+    # Fake mode keeps rerank off by default (the CI guarantee).
+    monkeypatch.setenv("RAG_DEMO_FAKE", "1")
+    monkeypatch.delenv("RAG_DEMO_RERANK", raising=False)
+    s = Settings()
+    assert s.rerank_enabled is False
+
+    # ...and an explicit RAG_DEMO_RERANK=1 still wins even under fake.
+    monkeypatch.setenv("RAG_DEMO_RERANK", "1")
+    s = Settings()
+    assert s.rerank_enabled is True

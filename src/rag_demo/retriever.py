@@ -1,10 +1,10 @@
 """FAISS-backed retrieval over the indexed corpus.
 
-Dense mode (default): pure vector similarity.
-Hybrid mode (RAG_DEMO_RETRIEVAL=hybrid): BM25 + dense with reciprocal rank
-fusion over the top candidates of each side. Reranking (RAG_DEMO_RERANK=1)
-applies a cross-encoder to the fused candidates — opt-in, downloads a small
-model on first use (never on CI).
+Dense mode (RAG_DEMO_RETRIEVAL=dense): pure vector similarity.
+Hybrid mode (default): BM25 + dense with reciprocal rank fusion over the
+top candidates of each side. Reranking (on by default;
+RAG_DEMO_RERANK=0 disables it) applies a cross-encoder to the fused
+candidates — downloads a small model on first use (never on CI).
 """
 
 from __future__ import annotations
