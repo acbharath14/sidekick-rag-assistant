@@ -2,7 +2,7 @@
 _Last updated: 2026-10-25 EDT_
 
 ## Where things stand
-- Main @0012801. PRs #36–#46 merged: production-readiness phases 1–5, pipeline walkthrough, README trim, setup-prereqs (#44), per-source regression (#45), Mermaid diagrams (#46). No open PRs.
+- Main @0012801. PRs #36–#46 merged: production-readiness phases 1–5, pipeline walkthrough, README trim, setup-prereqs (#44), per-source regression (#45), Mermaid diagrams (#46). No other open PRs (this refresh is the only one).
   https://github.com/acbharath14/sidekick-rag-assistant
 - Retrieval: hybrid BM25+dense with RRF fusion by default, top_k 8, rerank on (fake-aware: stays off under FAKE; explicit env wins). Relevance floor 0.5 (fake-aware, never on RRF scores). Chunk ids + section paths; citations as [source › section]; weak-evidence notice + abstain-friendly prompt when nothing passes the floor.
 - Answering: classic + agentic paths. Agentic loop: parallel search dispatch, single planning, streamed synthesis, iteration/wall-clock budgets with evidence + uncertainty on exhaustion.
