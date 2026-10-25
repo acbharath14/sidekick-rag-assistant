@@ -40,6 +40,7 @@ from rag_demo.modes import (
     source_status,
 )
 from rag_demo.preflight import run_preflight
+from rag_demo.walkthrough import SPECIMEN_TEXT, run_walkthrough
 from rag_demo.sources import SOURCES
 
 st.set_page_config(
@@ -500,6 +501,14 @@ with st.sidebar:
                 key="agentic-show-plan",
             )
             st.session_state["agentic_show_plan"] = show_plan
+
+        if st.button(
+            "🔍 How it works — pipeline walkthrough",
+            use_container_width=True,
+            help="See a document move through chunking → embedding → retrieval, with scores. No chat, no generation — just the pipeline.",
+        ):
+            st.session_state["show_walkthrough"] = True
+            st.rerun()
 
         st.subheader("Session")
         user_groups = st.text_input(
@@ -1012,6 +1021,117 @@ if getattr(preflight, "index_stale", False):
         "Build demo index in the Sources tab.",
         icon="⚠️",
     )
+
+# --------------------------------------------------- pipeline walkthrough ---
+# Follow-up (not a phase): a "How it works" view showing one document move
+# through chunking → embedding → retrieval, with scores. It uses its own
+# document (specimen or pasted text), never the current corpus, and stops
+# at retrieval — no generation, no summarize step. The view switch uses
+# st.stop(), the same pattern as the agentic plan-approval flow below, so
+# the chat UI never renders underneath the walkthrough. Results are cached
+# in session state keyed by document + query + retrieval settings, so a
+# rerun (e.g. collapsing an expander) does not re-embed.
+def _render_walkthrough(settings):
+    import hashlib
+
+    st.header("🔍 How it works — the pipeline, stage by stage")
+    st.caption(
+        "This walkthrough uses its own document — not the current corpus — "
+        "and stops at retrieval. There is no generation or summarize step "
+        "here; ask the same question in chat to see the full flow."
+    )
+    _choice = st.radio(
+        "Document",
+        ["Specimen document", "Paste your own text"],
+        horizontal=True,
+        key="walkthrough-doc-choice",
+    )
+    if _choice == "Specimen document":
+        _doc_text = SPECIMEN_TEXT
+        st.caption(
+            "Specimen — written to demonstrate the pipeline. Not corpus content."
+        )
+        with st.expander("Specimen document"):
+            st.code(_doc_text, language="markdown")
+    else:
+        _doc_text = st.text_area(
+            "Paste markdown or plain text",
+            height=200,
+            key="walkthrough-doc-text",
+        )
+    _query = st.text_input(
+        "Question to retrieve with",
+        value="How does chunking work?",
+        key="walkthrough-query",
+    )
+    if st.button("▶ Run walkthrough", type="primary"):
+        _key = hashlib.sha256(
+            f"{_doc_text}\n{_query}\n{settings.retrieval}\n"
+            f"{settings.rerank_enabled}\n{settings.relevance_floor}\n"
+            f"{settings.top_k}".encode()
+        ).hexdigest()
+        if st.session_state.get("walkthrough-key") != _key:
+            try:
+                st.session_state["walkthrough-result"] = run_walkthrough(
+                    _doc_text, "walkthrough-doc", _query, settings
+                )
+                st.session_state["walkthrough-key"] = _key
+            except Exception as e:  # noqa: BLE001 — show, don't crash the UI
+                st.error(f"Walkthrough failed: {e}")
+                st.session_state.pop("walkthrough-result", None)
+    _result = st.session_state.get("walkthrough-result")
+    if _result is None:
+        st.info(
+            "Press “Run walkthrough” to see the document move through "
+            "chunking → embedding → retrieval."
+        )
+        return
+    st.subheader(
+        f"1 · Chunking — {_result.chunk_count} chunks "
+        f"(size {settings.chunk_size}, overlap {settings.chunk_overlap})"
+    )
+    for _c in _result.chunks:
+        with st.expander(
+            f"`{_c.chunk_id}` · {_c.section or 'no section'} · {_c.chars} chars"
+        ):
+            st.caption(_c.text)
+    st.subheader("2 · Embedding")
+    _emb = _result.embedding
+    if _emb is None:
+        st.warning("No chunks to embed.")
+    else:
+        if _emb.fake:
+            st.warning(
+                "Fake embeddings are active (RAG_DEMO_FAKE=1): vectors below "
+                "show shape only — scores in stage 3 are not meaningful."
+            )
+        st.write(
+            f"Model: `{_emb.model}` · provider: `{_emb.provider}` · "
+            f"dimension: {_emb.dim} · vectors: {_emb.vector_count}"
+        )
+        st.caption(f"First chunk's vector, first 5 components: {_emb.preview}")
+    st.subheader(f"3 · Retrieval — query: “{_result.query}”")
+    st.caption(
+        f"Stages that ran: {', '.join(_result.retrieval_stages)} · "
+        f"candidates: {_result.candidates} · "
+        f"dropped by floor: {_result.floor_dropped}"
+    )
+    if not _result.hits:
+        st.warning("No passages passed retrieval.")
+    for _h in _result.hits:
+        with st.expander(
+            f"#{_h.rank} · {_h.confidence} confidence · [{_h.citation}]"
+        ):
+            st.caption(f"raw score: {_h.score:.3f} · chunk: `{_h.chunk_id}`")
+            st.caption(_h.text)
+
+
+if st.session_state.get("show_walkthrough"):
+    _render_walkthrough(settings)
+    if st.button("← Back to chat"):
+        st.session_state["show_walkthrough"] = False
+        st.rerun()
+    st.stop()
 
 # ------------------------------------------------------- regression run-all ---
 if st.session_state.pop("reg_run_all", False) and chat_ready:
