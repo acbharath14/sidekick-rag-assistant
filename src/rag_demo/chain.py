@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from .config import Settings, get_llm, get_settings
-from .retriever import Hit, Retriever
+from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
 from .audit import log_question
 
@@ -17,10 +17,10 @@ SYSTEM = """You answer questions using ONLY the context below.
 For greetings or remarks that aren't questions (e.g. "hi", "thanks", "that's
 wonderful"), respond briefly and naturally without citations.
 For factual questions: if the context doesn't contain the answer, say you
-don't know. Cite the source for each fact you use, like [api-reference.md]."""
+don't know. Cite the source + section for each fact you use, like [api-reference.md › Authentication]."""
 
 SYSTEM_HYBRID = """You answer questions using the context below when it contains the answer.
-Cite the source for each fact you use, like [api-reference.md].
+Cite the source + section for each fact you use, like [api-reference.md › Authentication].
 For greetings or remarks that aren't questions (e.g. "hi", "thanks", "that's
 wonderful"), respond briefly and naturally without citations.
 If the context doesn't contain the answer to a factual question, answer from
@@ -181,10 +181,27 @@ class Answer:
     latency_ms: float | None = None
     grounded: bool = True  # False when answered from general knowledge (hybrid)
     standalone_question: str | None = None  # rewritten follow-up, if any
+    # Phase 5 (A2+A3): True when retrieval found candidates but the
+    # relevance floor dropped all of them — the answer is not grounded
+    # in any passing passage, so the UI must say so explicitly.
+    weak_evidence: bool = False
 
 
 def format_hits(hits: list[Hit]) -> str:
-    return "\n\n".join(f"[{h.source}]\n{h.text}" for h in hits)
+    """Prompt context with passage-level citations (Phase 5): source +
+    section, not filename alone, so the model can cite precisely."""
+    return "\n\n".join(f"[{format_citation(h)}]\n{h.text}" for h in hits)
+
+
+def _citation_sources(hits: list[Hit]) -> list[str]:
+    """Deduped, sorted passage citations for display and audit."""
+    return sorted({format_citation(h) for h in hits})
+
+
+def _weak_evidence(hits: list[Hit], retriever) -> bool:
+    """True when candidates existed but the floor dropped every one.
+    A duck-typed retriever without floor bookkeeping reports False."""
+    return not hits and getattr(retriever, "last_floor_dropped", 0) > 0
 
 
 def build_chain(
@@ -280,14 +297,14 @@ def ask(
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
-    sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
-        sources=sources,
+        sources=_citation_sources(hits),
         hits=hits,
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
+        weak_evidence=_weak_evidence(hits, retriever),
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory for long-term recall (skip if it was a fallback
@@ -413,11 +430,12 @@ def stream_ask(
     hits = retriever.search(standalone, user_groups=groups)
     answer = Answer(
         text=text,
-        sources=sorted({h.source for h in hits}),
+        sources=_citation_sources(hits),
         hits=hits,
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
+        weak_evidence=_weak_evidence(hits, retriever),
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory (skip ungrounded fallbacks).

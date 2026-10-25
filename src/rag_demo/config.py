@@ -9,6 +9,13 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent.parent
 
+# Index format version (Phase 5, A2+A3). Version 2 indexes carry chunk_id
+# + section metadata on every chunk (see ingest.chunk_documents). Indexes
+# built by earlier versions lack those fields, so a version marker is
+# written next to every index (index_format.json) and loaders treat a
+# missing or older marker as stale — never silently filename-only.
+INDEX_FORMAT_VERSION = 2
+
 
 @dataclass
 class Settings:
@@ -62,6 +69,25 @@ class Settings:
             "0" if os.environ.get("RAG_DEMO_FAKE") == "1" else "1",
         )
         == "1"
+    )
+    # Relevance floor (Phase 5, A2+A3): minimum confidence for a passage
+    # to feed the prompt. Hits below the floor are dropped and, when
+    # nothing passes, the UI shows a weak-evidence notice instead of a
+    # confident guess. 0 disables the floor. Default 0.5 is principled,
+    # not golden-set tuned (no real embeddings in the sandbox to tune
+    # against — see retriever.confidence_for): it is the midpoint of the
+    # confidence scale, i.e. rerank logit 0 and dense L2 distance 1.0.
+    # Under RAG_DEMO_FAKE=1 the default is 0: fake-embedding distances
+    # are meaningless, so the fake tier never drops hits on them (same
+    # fake-aware pattern as the rerank default). An explicit
+    # RAG_DEMO_RELEVANCE_FLOOR value always wins.
+    relevance_floor: float = field(
+        default_factory=lambda: float(
+            os.environ.get(
+                "RAG_DEMO_RELEVANCE_FLOOR",
+                "0" if os.environ.get("RAG_DEMO_FAKE") == "1" else "0.5",
+            )
+        )
     )
     # Query rewriting for multi-turn chat. Default on; no-op without history.
     rewrite_enabled: bool = field(

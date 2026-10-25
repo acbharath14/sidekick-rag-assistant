@@ -27,6 +27,11 @@ class Reranker:
                 source=h.source,
                 score=float(s),
                 allowed_groups=h.allowed_groups,
+                # Phase 5: reranking re-scores, it must not strip the
+                # passage identity the floor and citations depend on.
+                chunk_id=h.chunk_id,
+                section=h.section,
+                dense_score=h.dense_score,
             )
             for s, h in ranked[:top_k]
         ]

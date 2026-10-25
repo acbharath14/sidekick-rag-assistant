@@ -18,16 +18,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .config import INDEX_FORMAT_VERSION
+
 
 @dataclass
 class PreflightResult:
     """Outcome of one pre-flight run. `problems` holds one human-
-    readable line per failure, each with its fix; empty when all green."""
+    readable line per failure, each with its fix; empty when all green.
+    `index_stale` (Phase 5, A2+A3) is separate from `index_ok`: a stale
+    index still answers, but citations degrade to filename-only, so the
+    app shows a rebuild banner instead of disabling chat."""
 
     ollama_ok: bool
     model_ok: bool
     index_ok: bool
     problems: list[str] = field(default_factory=list)
+    index_stale: bool = False
 
     @property
     def all_ok(self) -> bool:
@@ -74,6 +80,22 @@ def index_present(index_dir: Path) -> bool:
     writes index.faiss, so its presence is the built-index signal."""
     index_dir = Path(index_dir)
     return index_dir.is_dir() and (index_dir / "index.faiss").exists()
+
+
+def index_format_current(index_dir: Path) -> bool:
+    """True when the index carries the current chunk metadata (Phase 5,
+    A2+A3). A missing or older index_format.json marker means the index
+    predates chunk-level citations and must be rebuilt for full citations."""
+    marker = Path(index_dir) / "index_format.json"
+    if not marker.exists():
+        return False
+    try:
+        return (
+            json.loads(marker.read_text(encoding="utf-8")).get("version")
+            == INDEX_FORMAT_VERSION
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def run_preflight(
@@ -127,9 +149,15 @@ def run_preflight(
             "Sources panel (Build demo index) or run "
             f"`python -m rag_demo.ingest --source {corpus}`."
         )
+    # Phase 5: stale is not a failure — the index still answers — so it
+    # is reported separately and never lands in `problems` (which would
+    # read as "chat disabled until fixed"). The app renders its own
+    # rebuild banner from index_stale.
+    index_stale = bool(index_ok) and not index_format_current(Path(index_dir))
     return PreflightResult(
         ollama_ok=ollama_ok,
         model_ok=model_ok,
         index_ok=index_ok,
         problems=problems,
+        index_stale=index_stale,
     )

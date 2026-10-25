@@ -42,7 +42,13 @@ def check_case(case: dict, answer, real_llm: bool) -> list[tuple[str, bool]]:
         checks.append(("retrieval returned hits", bool(answer.sources)))
     if real_llm:
         if case.get("expected_sources"):
-            got, exp = set(answer.sources), set(case["expected_sources"])
+            # Phase 5: answer.sources are passage citations ("file ›
+            # section"), so compare on the filename part — the check
+            # means "the expected file was cited", unchanged.
+            from rag_demo.retriever import citation_source
+
+            got = {citation_source(s) for s in answer.sources}
+            exp = set(case["expected_sources"])
             checks.append(("expected sources cited", bool(got & exp)))
         text = answer.text.lower()
         if case.get("expect_keywords"):

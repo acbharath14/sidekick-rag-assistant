@@ -35,14 +35,23 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
   `ARCHITECTURE.md` for the connector pattern.
 - **Ingestion** (`rag_demo/ingest.py`): load → `RecursiveCharacterTextSplitter`
   (500 chars, 50 overlap) → embeddings → FAISS, persisted to `.faiss_index/`.
+  Every chunk carries passage identity: a chunk id (document id + section +
+  ordinal) and the section path from the document's headings, so citations
+  can point at a passage, not just a file.
 - **Retrieval** (`rag_demo/retriever.py`): similarity search with scores; every
-  hit carries its source file for citations. Expensive objects are cached
-  per session (`rag_demo/caching.py`): the embeddings object, the FAISS
-  retriever, and the episodic memory are built once per settings combination
-  instead of once per question; `RAG_DEMO_NO_CACHE=1` bypasses the cache.
+  hit carries its source file, section, and chunk id for citations. A
+  relevance floor (`RAG_DEMO_RELEVANCE_FLOOR`, default 0.5) drops passages
+  below a confidence threshold before they reach the prompt; when nothing
+  passes, the UI shows an explicit weak-evidence notice instead of a
+  confident guess. Retrieved passages display rank plus a qualitative
+  confidence band (High/Medium/Low); raw scores appear only as debug detail.
+  Expensive objects are cached per session (`rag_demo/caching.py`): the
+  embeddings object, the FAISS retriever, and the episodic memory are built
+  once per settings combination instead of once per question;
+  `RAG_DEMO_NO_CACHE=1` bypasses the cache.
 - **Answering** (`rag_demo/chain.py`): LCEL chain — retrieve → stuff into
   prompt → LLM. The system prompt forces answers from context only, with
-  `[source.md]` citations; no relevant passages means "I don't know".
+  `[source.md › Section]` citations; no relevant passages means "I don't know".
 - **MCP** (`rag_demo/mcp_server.py`): one tool, `search_docs(query, k)`, over
   stdio. Add it to any MCP client config.
 - **Episodic memory** (`rag_demo/episodic.py`): past questions and answers
@@ -59,6 +68,7 @@ DocumentSource ──load──▶ chunks ──embed──▶ FAISS index
 | LLM | Ollama `qwen3:8b` at `localhost:11434` | `RAG_DEMO_MODEL`, `RAG_DEMO_BASE_URL` |
 | Retrieval | hybrid (BM25+dense), `top_k=8` | `RAG_DEMO_RETRIEVAL=dense` (pure vector search) |
 | Rerank | on (off under `RAG_DEMO_FAKE=1`) | `RAG_DEMO_RERANK=0` to disable (cross-encoder, downloads once) |
+| Relevance floor | 0.5 confidence (off under `RAG_DEMO_FAKE=1`) | `RAG_DEMO_RELEVANCE_FLOOR=0` to disable, or any 0–1 value |
 | Session cache | embeddings + FAISS retriever + episodic memory, built once per session | `RAG_DEMO_NO_CACHE=1` (bypass) |
 | Agentic budget | 4 iterations, 300s wall-clock | `RAG_DEMO_AGENT_MAX_ITERATIONS`, `RAG_DEMO_AGENT_BUDGET_SECONDS` |
 | Web search (agentic) | DuckDuckGo scraping (unreliable) | `RAG_DEMO_TAVILY_API_KEY` (recommended) |
@@ -158,6 +168,31 @@ PYTHONPATH=src python -m rag_demo.ingest --source aws-s3       # RAG_DEMO_AWS_S3
 Each source gets its own index (`.faiss_index*/`). The sidebar's Sources
 tab (Demo or Workspace mode) lets you switch sources; the CLI reads
 `RAG_DEMO_INDEX_DIR` if you want it there too.
+
+### ⚠️ Required index rebuild (chunk-level citations)
+
+Indexes built before this change lack chunk-id and section metadata, so
+their citations degrade to filenames only. **Rebuild every index you use**
+after pulling this change — the app shows a rebuild banner above the chat
+while an index is stale, and the Sources tab's Build demo index button
+rebuilds stale demo indexes instead of skipping them:
+
+```bash
+PYTHONPATH=src python -m rag_demo.ingest --source meridian
+PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock
+PYTHONPATH=src python -m rag_demo.ingest --source playwright-docs
+PYTHONPATH=src python -m rag_demo.ingest --source github-docs   # needs --repo or RAG_DEMO_GITHUB_REPO
+PYTHONPATH=src python -m rag_demo.ingest --source confluence    # needs Confluence credentials
+PYTHONPATH=src python -m rag_demo.ingest --source jira          # needs Jira credentials
+PYTHONPATH=src python -m rag_demo.ingest --source outlook       # needs Outlook token
+PYTHONPATH=src python -m rag_demo.ingest --source aws-s3        # needs RAG_DEMO_AWS_S3_BUCKET
+```
+
+A rebuild writes an `index_format.json` marker next to the index; anything
+without the current marker is treated as stale. Incremental rebuilds
+(`--incremental`) never skip a stale index, even when documents are
+unchanged. Nothing is lost by waiting — a stale index still answers, it
+just cites filenames until rebuilt.
 
 ### Try the permission demo
 
@@ -277,6 +312,10 @@ never silently and never as a complete answer.
   doesn't plan twice; direct API/CLI callers still get one fallback plan.
 - **Streamed synthesis** — agentic answers stream tokens like classic mode
   instead of returning one-shot at the end.
+- **Structural sources** — agentic answers cite the retrieval result itself
+  (source + section + chunk id for corpus hits, link titles for web hits),
+  not bracketed tokens scraped out of tool text — so tool markers like
+  `[TOOL_ERROR]` or `[CACHED …]` can never appear as "sources".
 - **Smart routing** — the planner picks `search_docs` for API/code questions and
   `search_web` for everything else (prices, news, general knowledge). A fast-path
   heuristic skips the LLM planning call for obvious web queries, saving 20-30s on CPU.
@@ -312,11 +351,11 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 ├── src/rag_demo/
 │   ├── config.py            # env-based settings + model factories
 │   ├── modes.py             # Demo vs Workspace mode rules, picker labels, source statuses
-│   ├── preflight.py         # startup checks: Ollama, model, index (+ fix-it messages)
+│   ├── preflight.py         # startup checks: Ollama, model, index (+ fix-it messages, stale-index banner)
 │   ├── sources.py           # DocumentSource: 8 corpora (see enterprise.py for the real ones)
 │   ├── enterprise.py        # real Confluence / Jira / Outlook / AWS S3 connectors
-│   ├── ingest.py            # source → chunks → FAISS (+ --incremental, per-source indexes)
-│   ├── retriever.py         # dense / hybrid (BM25+RRF) + ACL filtering
+│   ├── ingest.py            # source → chunks → FAISS (+ --incremental, per-source indexes, chunk ids + sections)
+│   ├── retriever.py         # dense / hybrid (BM25+RRF) + ACL filtering + relevance floor + passage citations
 │   ├── rerank.py            # cross-encoder reranking (on by default)
 │   ├── rewrite.py           # multi-turn query rewriting
 │   ├── chain.py             # RAG chain with citations (+ streaming)
