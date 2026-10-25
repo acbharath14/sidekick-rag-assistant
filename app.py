@@ -969,7 +969,7 @@ reg_case = st.session_state.pop("pending_case", None)
 # Execute/Cancel triggers a rerun where `question` is None.
 agentic_pending = st.session_state.get("agentic_pending")
 if agentic_pending and index_ok:
-    from rag_demo.agent import agentic_ask, format_plan_as_ascii
+    from rag_demo.agent import format_plan_as_ascii, stream_agentic_ask
 
     pending_q = agentic_pending["question"]
     pending_plan = agentic_pending["plan"]
@@ -991,13 +991,24 @@ if agentic_pending and index_ok:
 
                 st.write("_This takes 1-2 minutes on CPU (multiple LLM calls)._")
                 try:
-                    answer = agentic_ask(
-                        pending_q, settings,
-                        verbose=False, show_plan=False,
-                        on_progress=_on_progress,
-                        history=st.session_state.get("history", []),
-                        retriever=active_retriever,
-                    )
+                    # Phase 2 (S3): run the user-approved plan (no second
+                    # planning call) and stream synthesis tokens.
+                    holder: dict = {}
+                    def _agentic_tokens():
+                        for event in stream_agentic_ask(
+                            pending_q, settings,
+                            verbose=False, show_plan=False,
+                            on_progress=_on_progress,
+                            history=st.session_state.get("history", []),
+                            retriever=active_retriever,
+                            plan=pending_plan,
+                        ):
+                            if "token" in event:
+                                yield event["token"]
+                            else:
+                                holder["answer"] = event["answer"]
+                    st.write_stream(_agentic_tokens())
+                    answer = holder["answer"]
                 except Exception as e:
                     status.update(label="❌ Failed", state="error")
                     st.error(f"Agent failed: {e}")
@@ -1053,7 +1064,7 @@ if question and index_ok:
 
         # Agentic mode: ReAct loop with optional plan approval.
         if st.session_state.get("agentic_mode", False):
-            from rag_demo.agent import agentic_ask, _parse_thought, THOUGHT_PROMPT
+            from rag_demo.agent import _parse_thought, THOUGHT_PROMPT, stream_agentic_ask
             from rag_demo.chain import get_llm, strip_think
 
             thinking.markdown(
@@ -1088,15 +1099,28 @@ if question and index_ok:
                 st.rerun()
             # If show_plan is off, execute directly (no approval).
 
-            # Execute the agentic loop.
+            # Execute the agentic loop (Phase 2, S3): run the plan the UI
+            # already built (no second planning call) and stream synthesis.
             with st.status("🤖 Running agent...", expanded=True) as status:
                 st.write("**Thought:** Planning searches...")
-                answer = agentic_ask(
-                    question, settings,
-                    verbose=False, show_plan=False,
-                    history=st.session_state.get("history", []),
-                    retriever=active_retriever,
-                )
+                holder = {}
+                def _agentic_tokens():
+                    for event in stream_agentic_ask(
+                        question, settings,
+                        verbose=False, show_plan=False,
+                        history=st.session_state.get("history", []),
+                        retriever=active_retriever,
+                        plan=plan,
+                    ):
+                        if "token" in event:
+                            yield event["token"]
+                        else:
+                            holder["answer"] = event["answer"]
+                st.write_stream(_agentic_tokens())
+                answer = holder.get("answer")
+                if answer is None:
+                    st.error("Couldn't answer: empty response from the agent.")
+                    st.stop()
                 st.write(f"**Action:** Executed {len(answer.sources)} tool calls")
                 st.write("**Observation:** Synthesizing answer...")
                 status.update(label="✅ Done", state="complete")

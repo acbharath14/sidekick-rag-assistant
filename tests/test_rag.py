@@ -812,3 +812,167 @@ def test_search_docs_tool_default_path_constructs_retriever(_indexed):
 
     out = _search_docs_tool("API token expiry", settings=_indexed)
     assert isinstance(out, str) and out
+
+
+# ---------------------------------------------------------------- Phase 2 (S3)
+
+
+class _Msg:
+    """Minimal stand-in for an LLM response chunk (has .content)."""
+
+    def __init__(self, content):
+        self.content = content
+
+
+class _ScriptedLLM:
+    """Fake LLM returning scripted responses by prompt type.
+
+    Planning prompts get plan_json, observation prompts get observation_json,
+    everything else (synthesis) gets synthesis_text. Records every prompt
+    so tests can assert which LLM calls did (or did not) happen.
+    """
+
+    def __init__(self, plan_json, observation_json, synthesis_text):
+        self.plan_json = plan_json
+        self.observation_json = observation_json
+        self.synthesis_text = synthesis_text
+        self.prompts = []
+
+    def invoke(self, prompt):
+        self.prompts.append(prompt)
+        if "research planner" in prompt:
+            return _Msg(self.plan_json)
+        if "evaluating retrieved evidence" in prompt:
+            return _Msg(self.observation_json)
+        return _Msg(self.synthesis_text)
+
+    def stream(self, prompt):
+        text = self.invoke(prompt).content
+        half = len(text) // 2
+        yield _Msg(text[:half])
+        yield _Msg(text[half:])
+
+
+def _patch_agent_tools(monkeypatch, llm):
+    import rag_demo.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "get_llm", lambda settings: llm)
+    monkeypatch.setattr(
+        agent_mod,
+        "_search_docs_tool",
+        lambda query, settings=None, retriever=None: "[doc.md]\npassage",
+    )
+    monkeypatch.setattr(agent_mod, "_search_web_tool", lambda query: "[web]\nresult")
+    return agent_mod
+
+
+def test_agent_parallel_dispatch_preserves_order():
+    """Phase 2 (S3): concurrent search dispatch keeps plan order."""
+    import threading
+    import time
+
+    from rag_demo.agent import _dispatch_plan
+
+    plan = [
+        {"tool": "search_docs", "query": "first"},
+        {"tool": "search_web", "query": "second"},
+        {"tool": "search_docs", "query": "third"},
+    ]
+    # Staggered sleeps: the first step finishes LAST. A sequential run
+    # returns plan order trivially; a parallel run must still return it
+    # (executor.map preserves submission order).
+    delays = {"first": 0.30, "second": 0.10, "third": 0.05}
+    active = {"n": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def dispatch(tool, query):
+        with lock:
+            active["n"] += 1
+            active["peak"] = max(active["peak"], active["n"])
+        try:
+            time.sleep(delays[query])
+            return f"{tool}:{query}"
+        finally:
+            with lock:
+                active["n"] -= 1
+
+    results = _dispatch_plan(plan, dispatch)
+    assert results == ["search_docs:first", "search_web:second", "search_docs:third"]
+    assert active["peak"] > 1, "expected overlapping dispatch calls"
+
+
+def test_agent_iteration_budget_adds_uncertainty_note(monkeypatch, settings):
+    """Phase 2 (S3): hitting the iteration cap stops with a note, not silence."""
+    import rag_demo.agent as agent_mod
+
+    not_sufficient = json.dumps({
+        "sufficient": False,
+        "gaps": ["still missing"],
+        "refined_queries": [{"tool": "search_docs", "query": "API token expiry"}],
+    })
+    llm = _ScriptedLLM(
+        json.dumps([{"tool": "search_docs", "query": "API token expiry"}]),
+        not_sufficient,
+        "Partial synthesized answer.",
+    )
+    _patch_agent_tools(monkeypatch, llm)
+    answer = agent_mod.agentic_ask("API token expiry", settings, max_iterations=2)
+    assert "Partial synthesized answer." in answer.text
+    assert "budget" in answer.text.lower()
+    assert "partial evidence" in answer.text.lower()
+
+
+def test_agent_wall_clock_budget_stops_early(monkeypatch, settings):
+    """Phase 2 (S3): an exhausted wall-clock budget stops before iterating."""
+    import rag_demo.agent as agent_mod
+
+    not_sufficient = json.dumps({
+        "sufficient": False,
+        "gaps": ["still missing"],
+        "refined_queries": [{"tool": "search_docs", "query": "API token expiry"}],
+    })
+    llm = _ScriptedLLM(
+        json.dumps([{"tool": "search_docs", "query": "API token expiry"}]),
+        not_sufficient,
+        "Partial synthesized answer.",
+    )
+    _patch_agent_tools(monkeypatch, llm)
+    answer = agent_mod.agentic_ask("API token expiry", settings, budget_seconds=0)
+    assert "budget" in answer.text.lower()
+    assert "partial evidence" in answer.text.lower()
+
+
+def test_agentic_ask_uses_passed_plan_without_replanning(monkeypatch, settings):
+    """Phase 2 (S3): a pre-built plan skips the agent's own planning call."""
+    import rag_demo.agent as agent_mod
+
+    sufficient = json.dumps({"sufficient": True, "gaps": [], "refined_queries": []})
+    llm = _ScriptedLLM("{}", sufficient, "Answer from approved plan.")
+    _patch_agent_tools(monkeypatch, llm)
+    answer = agent_mod.agentic_ask(
+        "API token expiry",
+        settings,
+        plan=[{"tool": "search_docs", "query": "approved query"}],
+    )
+    assert "Answer from approved plan." in answer.text
+    assert not any(
+        "research planner" in p for p in llm.prompts
+    ), "passed plan must skip the planning LLM call"
+
+
+def test_stream_agentic_ask_yields_tokens_then_answer(_indexed):
+    """Phase 2 (S3): streamed synthesis yields tokens, then one final answer."""
+    from rag_demo.agent import stream_agentic_ask
+    from rag_demo.retriever import Retriever
+
+    events = list(stream_agentic_ask(
+        "What is the max parcel weight?",
+        _indexed,
+        retriever=Retriever(_indexed),
+    ))
+    tokens = [e["token"] for e in events if "token" in e]
+    answers = [e["answer"] for e in events if "answer" in e]
+    assert tokens and "".join(tokens)
+    assert len(answers) == 1
+    assert answers[0].text == "".join(tokens)
+    assert answers[0].sources

@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from .chain import (
     Answer,
+    ThinkBlockFilter,
     get_llm,
     is_abstention,
     is_fallback_answer,
@@ -30,6 +32,36 @@ from .retriever import Retriever
 
 
 MAX_ITERATIONS = 4
+
+# Appended to the answer when the agent stops because it hit its iteration
+# or wall-clock budget (Phase 2, S3). The stop is never silent and never
+# presented as a complete answer: the note says the evidence is partial.
+BUDGET_NOTE = (
+    "\n\n_Note: the agent stopped early after reaching its iteration/time "
+    "budget; this answer is based on partial evidence and may be incomplete._"
+)
+
+
+def _dispatch_plan(plan, dispatch):
+    """Run search-tool calls concurrently, preserving plan order.
+
+    Only search-type tools reach this helper (a plan can only contain
+    search_docs/search_web — both I/O-bound). LLM generations stay
+    sequential: they contend on the same CPU Ollama model, so parallelizing
+    them would not help and could starve the model server.
+
+    Returns results in plan order (executor.map preserves submission
+    order), so synthesis sees evidence in the order the plan listed it.
+    A single-step plan runs inline to avoid thread overhead.
+    """
+    if not plan:
+        return []
+    if len(plan) == 1:
+        step = plan[0]
+        return [dispatch(step["tool"], step["query"])]
+    workers = min(len(plan), 4)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(lambda s: dispatch(s["tool"], s["query"]), plan))
 
 
 def _search_docs_tool(
@@ -364,17 +396,24 @@ def _parse_verify(text: str) -> dict:
     return {"sufficient": True, "gaps": [], "refined_queries": []}
 
 
-def agentic_ask(
+def stream_agentic_ask(
     question: str,
     settings: Settings | None = None,
-    max_iterations: int = MAX_ITERATIONS,
+    max_iterations: int | None = None,
+    budget_seconds: float | None = None,
     verbose: bool = False,
     show_plan: bool = False,
     on_progress: object = None,
     history: list[tuple[str, str]] | None = None,
     retriever: Retriever | None = None,
-) -> Answer:
-    """Run the ReAct loop (Thought → Action → Observation).
+    plan: list[dict] | None = None,
+):
+    """Run the ReAct loop (Thought → Action → Observation), streaming.
+
+    Yields {"token": str} chunks as the synthesis streams (matching
+    stream_ask's event protocol in classic mode), then a final
+    {"answer": Answer}. Powers st.write_stream in the UI; agentic_ask()
+    consumes this generator for the one-shot API.
 
     If show_plan is True, displays the plan as a flowchart and asks for
     confirmation before executing.
@@ -390,7 +429,18 @@ def agentic_ask(
         caching.py). When omitted, _search_docs_tool constructs one per
         call (old behavior).
 
-    Returns an Answer with sources from all tool calls.
+    plan: optional pre-built plan (list of {"tool", "query"} dicts), e.g.
+        the plan the UI already built and the user approved. When given,
+        the agent uses it directly and skips its own planning call (no
+        double planning). When omitted, the agent plans once itself
+        (fast-path or a single THOUGHT call) — the fallback for direct
+        API/CLI callers that pass no plan.
+
+    max_iterations / budget_seconds: iteration and wall-clock budget.
+        Defaults come from settings (agent_max_iterations,
+        agent_budget_seconds). When either budget is exhausted, the loop
+        stops with the evidence gathered so far and the final answer
+        carries BUDGET_NOTE — never silently, never as a complete answer.
     """
     import time
 
@@ -474,28 +524,38 @@ def agentic_ask(
             f"Q: {q}\nA: {a[:300]}" for q, a in history[-3:]
         )
 
-    # Fast path: obvious web queries skip the LLM planning call.
-    # Saves 20-30s on CPU by going straight to search_web.
-    # Uses effective_question (rewritten) so follow-ups route correctly.
-    _web_keywords = {
-        "black friday", "deals", "deal ", "price", "walmart", "amazon",
-        "target", "best buy", "costco", "sale", "discount", "coupon",
-        "news", "weather", "temperature", "stock price", "election", "president",
-        "celebrity", "movie", "sports", "game score",
-    }
-    _q_lower = effective_question.lower()
-    if any(kw in _q_lower for kw in _web_keywords):
-        _progress("thought", "Fast path: web query detected, skipping LLM planning")
-        plan = [{"tool": "search_web", "query": effective_question}]
-    else:
-        _progress("thought", "Planning search strategy...")
-        thought_text = _invoke(THOUGHT_PROMPT.format(
-            question=effective_question, current_date=current_date,
-            history=history_text or "No prior conversation."
-        ))
-        plan = _parse_thought(thought_text)
+    # Single planning call (Phase 2, S3): when the caller already built a
+    # plan (the UI builds one for approval), use it directly instead of
+    # planning a second time inside this function. The fallback below plans
+    # exactly once for direct API/CLI callers that pass no plan.
+    if plan is not None:
+        _progress("thought", "Using pre-built plan, skipping replanning")
+        plan = list(plan)
         if not plan:
             plan = [{"tool": "search_docs", "query": question}]
+    else:
+        # Fast path: obvious web queries skip the LLM planning call.
+        # Saves 20-30s on CPU by going straight to search_web.
+        # Uses effective_question (rewritten) so follow-ups route correctly.
+        _web_keywords = {
+            "black friday", "deals", "deal ", "price", "walmart", "amazon",
+            "target", "best buy", "costco", "sale", "discount", "coupon",
+            "news", "weather", "temperature", "stock price", "election", "president",
+            "celebrity", "movie", "sports", "game score",
+        }
+        _q_lower = effective_question.lower()
+        if any(kw in _q_lower for kw in _web_keywords):
+            _progress("thought", "Fast path: web query detected, skipping LLM planning")
+            plan = [{"tool": "search_web", "query": effective_question}]
+        else:
+            _progress("thought", "Planning search strategy...")
+            thought_text = _invoke(THOUGHT_PROMPT.format(
+                question=effective_question, current_date=current_date,
+                history=history_text or "No prior conversation."
+            ))
+            plan = _parse_thought(thought_text)
+            if not plan:
+                plan = [{"tool": "search_docs", "query": question}]
     _progress("thought", f"Plan: {len(plan)} tool calls")
 
     # ---- Show plan and get approval (if requested) ----
@@ -533,17 +593,27 @@ def agentic_ask(
                 print(format_plan_as_ascii(plan, question))
         elif confirm in ("n", "no", "q", "quit"):
             print("Plan rejected.")
-            return Answer(
+            yield {"answer": Answer(
                 text="Plan rejected by user.",
                 sources=[], hits=[], latency_ms=0,
                 grounded=False, standalone_question=None,
-            )
+            )}
+            return
         print()  # blank line before execution
 
     # ---- ACTION → OBSERVATION loop ----
+    # Budgets resolve here (None = settings default). The iteration budget
+    # preserves the old max_iterations behavior; the wall-clock budget is
+    # checked at the top of each iteration below.
+    if max_iterations is None:
+        max_iterations = settings.agent_max_iterations
+    if budget_seconds is None:
+        budget_seconds = settings.agent_budget_seconds
     all_evidence: list[str] = []
     all_sources: set[str] = set()
     iteration = 0
+    sufficient = False
+    budget_exhausted = False
 
     def _dispatch(tool: str, query: str) -> str:
         if tool == "search_web":
@@ -551,14 +621,21 @@ def agentic_ask(
         return _search_docs_tool(query, settings=settings, retriever=retriever)
 
     while iteration < max_iterations:
+        # Wall-clock budget: stop before starting another iteration.
+        if time.perf_counter() - started >= budget_seconds:
+            _progress("observation", "Wall-clock budget exhausted, stopping.")
+            budget_exhausted = True
+            break
         iteration += 1
         _progress("action", f"Iteration {iteration}: executing {len(plan)} searches...")
 
-        # ACTION: execute tool calls.
+        # ACTION: execute tool calls in parallel (search-type only), keeping
+        # evidence in plan order for synthesis (Phase 2, S3).
         for step in plan:
+            _progress("action", f"Searching [{step['tool']}]: {step['query'][:60]}")
+        results = _dispatch_plan(plan, _dispatch)
+        for step, result in zip(plan, results):
             tool, q = step["tool"], step["query"]
-            _progress("action", f"Searching [{tool}]: {q[:60]}")
-            result = _dispatch(tool, q)
             all_evidence.append(f"--- {tool}: {q} ---\n{result}")
             for m in re.finditer(r"\[([^\]]+)\]", result):
                 all_sources.add(m.group(1))
@@ -572,13 +649,14 @@ def agentic_ask(
             history=history_text or "No prior conversation."
         ))
         verdict = _parse_verify(obs_text)
+        sufficient = bool(verdict["sufficient"])
         _progress(
             "observation",
             f"Sufficient: {verdict['sufficient']}"
             + (f", gaps: {verdict['gaps']}" if verdict.get("gaps") else "")
         )
 
-        if verdict["sufficient"]:
+        if sufficient:
             break
 
         # Refine: parse refined queries into tool calls for the next iteration.
@@ -599,22 +677,93 @@ def agentic_ask(
             break
         plan = new_plan
 
-    # ---- SYNTHESIZE ----
+    # Iteration budget: the loop ended on the cap without a sufficient
+    # verdict (as opposed to breaking early on sufficiency or on having
+    # no refined queries). That is budget exhaustion, not a normal stop.
+    if not sufficient and iteration >= max_iterations:
+        budget_exhausted = True
+
+    # ---- SYNTHESIZE (streamed, Phase 2, S3) ----
+    # Matches stream_ask in classic mode: tokens stream as the model
+    # generates them (think blocks suppressed), then a final answer event.
+    # Falls back to one-shot synthesis when the LLM cannot stream.
     _progress("synthesize", "Synthesizing final answer from all evidence...")
     evidence_text = "\n\n".join(all_evidence)
-    answer_text = _invoke(SYNTHESIZE_PROMPT.format(
+    synth_prompt = SYNTHESIZE_PROMPT.format(
         question=effective_question, evidence=evidence_text,
         current_date=current_date,
         history=history_text or "No prior conversation."
-    ))
+    )
+    parts: list[str] = []
+    think_filter = ThinkBlockFilter()
+    try:
+        for chunk in llm.stream(synth_prompt):
+            text = chunk.content if hasattr(chunk, "content") else str(chunk)
+            parts.append(text)
+            visible = think_filter.feed(text)
+            if visible:
+                yield {"token": visible}
+    except Exception:
+        # Streaming not supported by this LLM — fall back to one shot.
+        text = _invoke(synth_prompt)
+        yield {"token": text}
+        parts = [text]
+    flushed = think_filter.flush()
+    if flushed:
+        yield {"token": flushed}
+    answer_text = strip_think("".join(parts))
+    answer_text = strip_think(answer_text)  # belt-and-braces
+    if budget_exhausted:
+        # Never silent, never presented as complete: the note marks the
+        # answer as built from partial evidence.
+        answer_text += BUDGET_NOTE
     _progress("synthesize", "Done.")
 
     latency_ms = (time.perf_counter() - started) * 1000
-    return Answer(
+    yield {"answer": Answer(
         text=answer_text,
         sources=sorted(all_sources),
         hits=[],
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(answer_text),
         standalone_question=None,
-    )
+    )}
+
+
+def agentic_ask(
+    question: str,
+    settings: Settings | None = None,
+    max_iterations: int | None = None,
+    verbose: bool = False,
+    show_plan: bool = False,
+    on_progress: object = None,
+    history: list[tuple[str, str]] | None = None,
+    retriever: Retriever | None = None,
+    plan: list[dict] | None = None,
+    budget_seconds: float | None = None,
+) -> Answer:
+    """One-shot wrapper around stream_agentic_ask (same parameters).
+
+    Existing callers (Streamlit app, CLI, MCP) keep working unchanged;
+    the loop itself lives in stream_agentic_ask so synthesis streams
+    instead of returning one-shot. max_iterations/budget_seconds default
+    to the settings values when None (iteration default 4, as before).
+    """
+    answer = None
+    for event in stream_agentic_ask(
+        question,
+        settings=settings,
+        max_iterations=max_iterations,
+        budget_seconds=budget_seconds,
+        verbose=verbose,
+        show_plan=show_plan,
+        on_progress=on_progress,
+        history=history,
+        retriever=retriever,
+        plan=plan,
+    ):
+        if "answer" in event:
+            answer = event["answer"]
+    if answer is None:  # pragma: no cover — generator always yields an answer
+        raise RuntimeError("agentic run produced no answer")
+    return answer
