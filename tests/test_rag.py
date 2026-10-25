@@ -220,9 +220,11 @@ def test_confluence_mock_loads_pages_with_acls():
     docs = MockConfluenceSource(
         Path(__file__).resolve().parent.parent / "fixtures" / "confluence"
     ).load()
-    assert len(docs) == 4
+    assert len(docs) == 6
     by_source = {d.metadata["source"]: d for d in docs}
     assert "confluence:OPS/Driver pay bands FY27" in by_source
+    assert "confluence:OPS/API key rotation schedule" in by_source
+    assert "confluence:OPS/Incident severity levels" in by_source
     restricted = by_source["confluence:OPS/Driver pay bands FY27"]
     assert restricted.metadata["allowed_groups"] == ["ops-leads"]
     public = by_source["confluence:OPS/TMS deploy checklist"]

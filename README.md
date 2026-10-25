@@ -88,6 +88,17 @@ RAG_DEMO_FAKE=1 PYTHONPATH=src python -m evals.regression
 # With Ollama running, also check answer content:
 PYTHONPATH=src python -m evals.regression --real-llm
 
+# 3c. Run the per-source regression suites (one prompt set per corpus,
+# four dimensions per source: accuracy, retrieval, rerank, precision).
+# Sources with no built index are skipped with a reason; enterprise
+# sources (confluence, jira, outlook, aws-s3) are skipped when
+# unconnected — they are only ever measured against real content.
+PYTHONPATH=src python -m evals.per_source
+# With Ollama running, also check answer content:
+PYTHONPATH=src python -m evals.per_source --answers
+# One source only:
+PYTHONPATH=src python -m evals.per_source --source meridian
+
 # 4. Run the test suite (fakes — no models, no keys)
 RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 ```
@@ -96,20 +107,9 @@ RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 
 `python scripts/setup.py` is the idempotent bootstrap: it checks
 dependencies, installs/starts Ollama if absent, pulls the default model
-(`qwen3:8b`), prints a per-source readiness report for all 8 sources,
-builds the demo indexes (Meridian + Confluence mock), and
+(`qwen3:8b`), builds the demo indexes (Meridian + Confluence mock), and
 verifies with one test question. Re-running is safe — every step is
-skipped when already done. The readiness report runs before any index
-build, so a missing repo, credential, or package is reported with its
-fix (`github-docs: skipped — pass --repo owner/name or set
-RAG_DEMO_GITHUB_REPO`) instead of failing mid-run. By default only the
-demo indexes are built; `--all` builds every ready source (demo, docs,
-and any configured enterprise source), `--source NAME` builds one
-source and fails fast with the exact fix when its prerequisites are
-missing, and `--check-only` prints the report without building
-anything. Unconfigured enterprise sources are skipped, never errors;
-when an S3 bucket is set but boto3 is missing, setup installs boto3
-via pip (it is never installed for users with no S3 intent). Honest limits: model weights are gigabytes
+skipped when already done. Honest limits: model weights are gigabytes
 and are fetched, not cloned, so the repo stays light; the macOS/Windows
 install branches are written carefully but not yet verified on real
 machines (if an automatic install fails, the script prints the manual
@@ -339,7 +339,7 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 ```
 ├── docs/                    # fictional corpus (the default knowledge base)
 ├── app.py                   # Streamlit chat UI (streaming, citations, ACL demo, Demo/Workspace modes, pre-flight)
-├── scripts/setup.py         # idempotent fresh-clone bootstrap (Ollama, model, prerequisite report, demo indexes, test question)
+├── scripts/setup.py         # idempotent fresh-clone bootstrap (Ollama, model, demo indexes, test question)
 ├── .streamlit/config.toml   # UI theme
 ├── ARCHITECTURE.md          # pipeline, connector pattern, scale notes
 ├── src/rag_demo/
@@ -371,8 +371,10 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── baselines.json       # per-mode hit-rate floors
 │   ├── regression.py        # end-to-end regression runner (standard prompts)
 │   ├── regression_cases.json # 9 demo cases: factual, abstention, small-talk, follow-up
+│   ├── per_source.py        # per-source suites: accuracy, retrieval, rerank, precision
+│   ├── per_source/          # one prompt file per source with real content
 │   └── mcp_demo.py          # MCP server demo script
-└── tests/                   # pytest suite (fake embeddings/LLM): test_rag.py, test_phase4.py (modes, pre-flight, setup), test_setup_prereqs.py (setup readiness)
+└── tests/                   # pytest suite (fake embeddings/LLM): test_rag.py, test_phase4.py (modes, pre-flight, setup)
 ```
 
 ## Adapting it
