@@ -85,7 +85,7 @@ class Settings:
         default_factory=lambda: float(
             os.environ.get(
                 "RAG_DEMO_RELEVANCE_FLOOR",
-                "0" if os.environ.get("RAG_DEMO_FAKE") == "1" else "0.5",
+                "0",
             )
         )
     )
