@@ -1,8 +1,11 @@
 """Ad-hoc file text extraction for the upload feature.
 
-Supported: .pdf (pypdf), .docx (python-docx), .txt/.md (utf-8), .csv
-(rendered as a markdown table, capped at 200 rows). Anything else raises
-UnsupportedFormat. Pure-Python deps only — Intel-Mac and CI safe.
+Supported: .pdf, .docx, .txt/.md (utf-8), .csv (rendered as a markdown
+table, capped at 200 rows). Anything else raises UnsupportedFormat.
+
+PDF extraction tries backends in order (inspired by doc-extract-eval):
+pymupdf (fastest) → pdfplumber (best tables) → pypdf (pure Python).
+Each is optional — missing backends are skipped silently.
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ class UnsupportedFormat(Exception):
 
 
 def extract_text(filename: str, data: bytes) -> str:
+    """Extract text. Returns (text, extractor_name) for PDFs so callers can
+    report which backend was used."""
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext == ".pdf":
         return _extract_pdf(data)
@@ -32,7 +37,58 @@ def extract_text(filename: str, data: bytes) -> str:
     )
 
 
+def extract_text_with_meta(filename: str, data: bytes) -> tuple[str, str]:
+    """Like extract_text but also returns the extractor backend name."""
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == ".pdf":
+        return _extract_pdf_with_fallback(data)
+    text = extract_text(filename, data)
+    return text, ext.lstrip(".") if ext else "text"
+
+
 def _extract_pdf(data: bytes) -> str:
+    text, _ = _extract_pdf_with_fallback(data)
+    return text
+
+
+def _extract_pdf_with_fallback(data: bytes) -> tuple[str, str]:
+    """Try PDF backends in order; return (text, backend_name)."""
+    for backend in ("pymupdf", "pdfplumber", "pypdf"):
+        try:
+            if backend == "pymupdf":
+                text = _extract_pdf_pymupdf(data)
+            elif backend == "pdfplumber":
+                text = _extract_pdf_pdfplumber(data)
+            else:
+                text = _extract_pdf_pypdf(data)
+            if text.strip():
+                return text, backend
+        except ImportError:
+            continue  # backend not installed — try the next one
+        except Exception:
+            continue  # backend failed on this file — try the next one
+    # All backends failed or produced nothing.
+    return "", "none"
+
+
+def _extract_pdf_pymupdf(data: bytes) -> str:
+    import fitz  # pymupdf
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    return "\n\n".join(page.get_text() or "" for page in doc).strip()
+
+
+def _extract_pdf_pdfplumber(data: bytes) -> str:
+    import pdfplumber
+
+    parts = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for page in pdf.pages:
+            parts.append(page.extract_text() or "")
+    return "\n\n".join(parts).strip()
+
+
+def _extract_pdf_pypdf(data: bytes) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))

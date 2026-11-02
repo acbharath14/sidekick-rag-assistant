@@ -150,7 +150,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
     """Upload a document: extract text, summarize, build an in-memory index.
     Returns an upload_id for subsequent /api/chat calls. Nothing is written
     to disk."""
-    from .extract import UnsupportedFormat, extract_text
+    from .extract import UnsupportedFormat, extract_text_with_meta
 
     settings = get_settings()
     max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
@@ -158,7 +158,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
     if len(data) > max_mb * 1024 * 1024:
         return {"ok": False, "error": f"File too large (over {max_mb:.0f} MB)."}
     try:
-        text = extract_text(file.filename or "upload", data)
+        text, extractor = extract_text_with_meta(file.filename or "upload", data)
     except UnsupportedFormat as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:
@@ -200,6 +200,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
         "filename": file.filename,
         "char_count": len(text),
         "chunk_count": len(chunks),
+        "extractor": extractor,
         "summary": summary,
     }
 
