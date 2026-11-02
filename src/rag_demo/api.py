@@ -23,16 +23,23 @@ Endpoints:
   PATCH  /api/conversations/{id}       rename ({title})
   DELETE /api/conversations/{id}       delete conversation + messages
   DELETE /api/conversations/{id}/messages  clear messages, keep conversation
+
+Auth: when the RAG_DEMO_API_KEY env var is set (non-empty), every /api/*
+endpoint except /api/health requires the matching X-API-Key header
+(401 {"detail": "Invalid or missing API key"} otherwise). When the env var
+is unset or empty, all endpoints are open (local dev).
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import uuid
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import status as http_status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -57,6 +64,32 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+
+
+def require_api_key(
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    """Dependency: enforce X-API-Key auth when RAG_DEMO_API_KEY is set.
+
+    - Env var unset or empty -> open access (local dev, backwards compatible).
+    - Env var set -> every /api/* endpoint except /api/health requires the
+      matching header, else 401 {"detail": "Invalid or missing API key"}.
+    The env var is read per-request (not at import time) so tests and
+    process managers can change it without a restart.
+    """
+    expected = os.environ.get("RAG_DEMO_API_KEY", "").strip()
+    if not expected:
+        return  # auth disabled
+    if x_api_key is None or not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+        )
+
+
+# Shorthand applied to every protected route below. /api/health is
+# deliberately exempt (Docker healthchecks, frontend health indicator).
+_auth = [Depends(require_api_key)]
 
 
 def _hit_to_wire(h: Any) -> dict:
@@ -102,7 +135,7 @@ def _document_exists(doc_id: str | None) -> str | None:
     return doc_id if conv_store.get_document(doc_id) else None
 
 
-@app.post("/api/chat")
+@app.post("/api/chat", dependencies=_auth)
 def chat(req: ChatRequest) -> dict:
     conv_id = req.conversation_id
     if conv_id and conv_store.conversation_exists(conv_id):
@@ -132,7 +165,7 @@ def chat(req: ChatRequest) -> dict:
     return body
 
 
-@app.post("/api/chat/stream")
+@app.post("/api/chat/stream", dependencies=_auth)
 def chat_stream(req: ChatRequest) -> StreamingResponse:
     doc_id = _document_exists(req.document_id)
     conv_id = (
@@ -176,17 +209,17 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 # --- Conversations (multi-chat persistence) ---
 
 
-@app.get("/api/conversations")
+@app.get("/api/conversations", dependencies=_auth)
 def list_conversations() -> dict:
     return {"conversations": conv_store.list_conversations()}
 
 
-@app.post("/api/conversations")
+@app.post("/api/conversations", dependencies=_auth)
 def create_conversation(req: CreateConversationRequest) -> dict:
     return conv_store.create_conversation(req.title)
 
 
-@app.get("/api/conversations/{conv_id}")
+@app.get("/api/conversations/{conv_id}", dependencies=_auth)
 def get_conversation(conv_id: str) -> dict:
     conv = conv_store.get_conversation(conv_id)
     if not conv:
@@ -194,7 +227,7 @@ def get_conversation(conv_id: str) -> dict:
     return conv
 
 
-@app.patch("/api/conversations/{conv_id}")
+@app.patch("/api/conversations/{conv_id}", dependencies=_auth)
 def rename_conversation(conv_id: str, req: RenameConversationRequest) -> dict:
     title = (req.title or "").strip()
     if not title:
@@ -204,14 +237,14 @@ def rename_conversation(conv_id: str, req: RenameConversationRequest) -> dict:
     return {"ok": True}
 
 
-@app.delete("/api/conversations/{conv_id}")
+@app.delete("/api/conversations/{conv_id}", dependencies=_auth)
 def delete_conversation(conv_id: str) -> dict:
     if not conv_store.delete_conversation(conv_id):
         return {"ok": False, "error": "Conversation not found."}
     return {"ok": True}
 
 
-@app.delete("/api/conversations/{conv_id}/messages")
+@app.delete("/api/conversations/{conv_id}/messages", dependencies=_auth)
 def clear_conversation_messages(conv_id: str) -> dict:
     if not conv_store.clear_messages(conv_id):
         return {"ok": False, "error": "Conversation not found."}
@@ -237,7 +270,7 @@ def health() -> dict:
     }
 
 
-@app.get("/api/config")
+@app.get("/api/config", dependencies=_auth)
 def config() -> dict:
     settings = get_settings()
     return {
@@ -249,7 +282,7 @@ def config() -> dict:
     }
 
 
-@app.post("/api/feedback")
+@app.post("/api/feedback", dependencies=_auth)
 def feedback(req: FeedbackRequest) -> dict:
     if req.vote not in ("up", "down"):
         return {"ok": False, "error": "vote must be 'up' or 'down'"}
@@ -257,7 +290,7 @@ def feedback(req: FeedbackRequest) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/upload")
+@app.post("/api/upload", dependencies=_auth)
 async def upload(file: UploadFile = File(...)) -> dict:
     """Upload a document into the PERSISTENT knowledge base.
 
@@ -272,7 +305,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
     from langchain_community.vectorstores import FAISS
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    from .extract import UnsupportedFormat, extract_text_with_meta
+    from .extract import UnsupportedFormat, extract_text_with_meta, verify_magic_bytes
 
     settings = get_settings()
     max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
@@ -280,6 +313,8 @@ async def upload(file: UploadFile = File(...)) -> dict:
     if len(data) > max_mb * 1024 * 1024:
         return {"ok": False, "error": f"File too large (over {max_mb:.0f} MB)."}
     try:
+        if not verify_magic_bytes(file.filename or "upload", data):
+            return {"ok": False, "error": "File content doesn't match its extension."}
         text, extractor = extract_text_with_meta(file.filename or "upload", data)
     except UnsupportedFormat as e:
         return {"ok": False, "error": str(e)}
@@ -337,12 +372,12 @@ async def upload(file: UploadFile = File(...)) -> dict:
     return {"ok": True, **doc}
 
 
-@app.get("/api/documents")
+@app.get("/api/documents", dependencies=_auth)
 def list_documents() -> dict:
     return {"documents": conv_store.list_documents()}
 
 
-@app.get("/api/documents/{doc_id}")
+@app.get("/api/documents/{doc_id}", dependencies=_auth)
 def get_document(doc_id: str) -> dict:
     """Full metadata + cached summary (generated on demand if missing)."""
     doc = conv_store.get_document(doc_id)
@@ -363,7 +398,7 @@ def get_document(doc_id: str) -> dict:
     return {"ok": True, **doc}
 
 
-@app.post("/api/documents/{doc_id}/summarize")
+@app.post("/api/documents/{doc_id}/summarize", dependencies=_auth)
 def summarize_document(doc_id: str) -> dict:
     """(Re)generate the LLM summary for a document and cache it in SQLite."""
     doc = conv_store.get_document(doc_id)
@@ -387,7 +422,7 @@ def summarize_document(doc_id: str) -> dict:
     return {"ok": True, "summary": summary}
 
 
-@app.delete("/api/documents/{doc_id}")
+@app.delete("/api/documents/{doc_id}", dependencies=_auth)
 def delete_document(doc_id: str) -> dict:
     """Remove a document: filter its chunks out of chunks.json, rebuild the
     FAISS index from the remaining chunks, and delete the SQLite row."""
@@ -432,7 +467,7 @@ def delete_document(doc_id: str) -> dict:
 
 
 # Legacy alias: the React UI's summarize button used /api/upload/{id}/summarize.
-@app.post("/api/upload/{doc_id}/summarize")
+@app.post("/api/upload/{doc_id}/summarize", dependencies=_auth)
 def summarize_upload(doc_id: str) -> dict:
     return summarize_document(doc_id)
 

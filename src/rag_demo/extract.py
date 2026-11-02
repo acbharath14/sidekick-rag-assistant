@@ -6,6 +6,9 @@ table, capped at 200 rows). Anything else raises UnsupportedFormat.
 PDF extraction tries backends in order (inspired by doc-extract-eval):
 pymupdf (fastest) → pdfplumber (best tables) → pypdf (pure Python).
 Each is optional — missing backends are skipped silently.
+
+verify_magic_bytes() guards uploads against extension spoofing (e.g. a
+script renamed to .pdf) using stdlib-only magic-byte checks.
 """
 
 from __future__ import annotations
@@ -18,6 +21,36 @@ SUPPORTED = (".pdf", ".docx", ".txt", ".md", ".csv")
 
 class UnsupportedFormat(Exception):
     pass
+
+
+def _extension(filename: str) -> str:
+    return "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def verify_magic_bytes(filename: str, data: bytes) -> bool:
+    """Check that the file's leading bytes match its extension.
+
+    Stdlib-only (no python-magic). Raises UnsupportedFormat for unknown
+    extensions; returns True/False for known ones. An empty payload is
+    valid UTF-8 (so .txt passes) but fails binary signatures (so .pdf
+    and .docx fail) — emptiness itself is rejected later by the
+    "No text found" check in the upload endpoint.
+    """
+    ext = _extension(filename)
+    if ext == ".pdf":
+        return data.startswith(b"%PDF-")
+    if ext == ".docx":
+        # docx is a ZIP archive; local file header signature.
+        return data.startswith(b"PK\x03\x04")
+    if ext in (".txt", ".md", ".csv"):
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+        return True
+    raise UnsupportedFormat(
+        f"{filename!r}: supported types are {', '.join(SUPPORTED)}"
+    )
 
 
 def extract_text(filename: str, data: bytes) -> str:
