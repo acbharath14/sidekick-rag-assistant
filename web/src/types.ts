@@ -32,6 +32,16 @@ export interface FeedbackResponse {
   error?: string;
 }
 
+export interface UploadResponse {
+  ok: boolean;
+  upload_id: string;
+  filename: string;
+  char_count: number;
+  chunk_count: number;
+  summary: string;
+  error?: string;
+}
+
 export type ChatRole = "user" | "assistant";
 
 export interface ChatTurn {

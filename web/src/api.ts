@@ -3,6 +3,7 @@ import type {
   ConfigResponse,
   FeedbackResponse,
   HealthResponse,
+  UploadResponse,
 } from "./types";
 
 const API_BASE: string =
@@ -44,8 +45,13 @@ export function fetchConfig(): Promise<ConfigResponse> {
 export function postChat(
   question: string,
   history: Array<[string, string]>,
+  uploadId?: string | null,
 ): Promise<ChatResponse> {
-  return postJson<ChatResponse>("/api/chat", { question, history });
+  return postJson<ChatResponse>("/api/chat", {
+    question,
+    history,
+    upload_id: uploadId ?? null,
+  });
 }
 
 export function postFeedback(
@@ -53,6 +59,33 @@ export function postFeedback(
   vote: "up" | "down",
 ): Promise<FeedbackResponse> {
   return postJson<FeedbackResponse>("/api/feedback", { question, vote });
+}
+
+export async function uploadFile(file: File): Promise<UploadResponse> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`${API_BASE}/api/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(`POST /api/upload failed: ${res.status} ${res.statusText}`);
+  }
+  const data = (await res.json()) as UploadResponse;
+  if (!data.ok) {
+    throw new Error(data.error ?? "Upload failed");
+  }
+  return data;
+}
+
+export async function deleteUpload(uploadId: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/upload/${encodeURIComponent(uploadId)}`, {
+      method: "DELETE",
+    });
+  } catch {
+    // Best-effort cleanup; the server holds uploads in memory only.
+  }
 }
 
 export interface StreamCallbacks {
@@ -65,6 +98,7 @@ export function streamChat(
   question: string,
   history: Array<[string, string]>,
   cb: StreamCallbacks,
+  uploadId?: string | null,
 ): () => void {
   const ctrl = new AbortController();
   let buffer = "";
@@ -74,7 +108,11 @@ export function streamChat(
       const res = await fetch(`${API_BASE}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, history }),
+        body: JSON.stringify({
+          question,
+          history,
+          upload_id: uploadId ?? null,
+        }),
         signal: ctrl.signal,
       });
       if (!res.ok || !res.body) {

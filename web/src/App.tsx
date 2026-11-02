@@ -1,14 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchConfig, fetchHealth, streamChat } from "./api";
+import {
+  deleteUpload,
+  fetchConfig,
+  fetchHealth,
+  streamChat,
+  uploadFile,
+} from "./api";
 import type {
   ChatResponse,
   ChatTurn,
   ConfigResponse,
   HealthResponse,
+  UploadResponse,
 } from "./types";
+import AttachButton from "./components/AttachButton";
 import ChatMessage from "./components/ChatMessage";
 import ContextBanner from "./components/ContextBanner";
 import HealthIndicator from "./components/HealthIndicator";
+import UploadBanner from "./components/UploadBanner";
+import UploadCard from "./components/UploadCard";
 
 let nextId = 1;
 
@@ -23,6 +33,10 @@ export default function App() {
   const [healthLoading, setHealthLoading] = useState(true);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [upload, setUpload] = useState<UploadResponse | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [activeUploadId, setActiveUploadId] = useState<string | null>(null);
   const cancelRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -90,6 +104,7 @@ export default function App() {
     const userId = nextId++;
     const asstId = nextId++;
     const history = historyFor(turns.length);
+    const uploadId = activeUploadId;
 
     setTurns((prev) => [
       ...prev,
@@ -144,7 +159,48 @@ export default function App() {
         setSending(false);
         cancelRef.current = null;
       },
-    });
+    }, uploadId);
+  };
+
+  const handleFile = async (file: File): Promise<void> => {
+    if (uploading || sending) return;
+    if (upload) {
+      await deleteUpload(upload.upload_id);
+    }
+    setUpload(null);
+    setActiveUploadId(null);
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const res = await uploadFile(file);
+      setUpload(res);
+    } catch (err) {
+      setUploadError((err as Error).message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleChatWithFile = (): void => {
+    if (upload) {
+      setActiveUploadId(upload.upload_id);
+    }
+  };
+
+  const clearUpload = async (): Promise<void> => {
+    if (upload) {
+      await deleteUpload(upload.upload_id);
+    }
+    setUpload(null);
+    setActiveUploadId(null);
+  };
+
+  const handleDismissUpload = (): void => {
+    void clearUpload();
+  };
+
+  const handleClearActive = (): void => {
+    void clearUpload();
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -206,23 +262,52 @@ export default function App() {
         <div ref={bottomRef} />
       </main>
       <footer className="composer">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="Ask a question… (Enter to send, Shift+Enter for a new line)"
-          rows={2}
-          disabled={sending}
-          aria-label="Your question"
-        />
-        <button
-          type="button"
-          className="send-button"
-          onClick={send}
-          disabled={sending || !input.trim()}
-        >
-          {sending ? "…" : "Send"}
-        </button>
+        {activeUploadId && upload && (
+          <UploadBanner
+            filename={upload.filename}
+            onClear={handleClearActive}
+          />
+        )}
+        {upload && !activeUploadId && (
+          <UploadCard
+            upload={upload}
+            onChat={handleChatWithFile}
+            onDismiss={handleDismissUpload}
+          />
+        )}
+        {uploadError && (
+          <div className="upload-error" role="alert">
+            {uploadError}
+          </div>
+        )}
+        <div className="composer-row">
+          <AttachButton
+            onFile={(f) => void handleFile(f)}
+            disabled={sending}
+            uploading={uploading}
+          />
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={
+              activeUploadId
+                ? "Ask a question about the uploaded file… (Enter to send)"
+                : "Ask a question… (Enter to send, Shift+Enter for a new line)"
+            }
+            rows={2}
+            disabled={sending}
+            aria-label="Your question"
+          />
+          <button
+            type="button"
+            className="send-button"
+            onClick={send}
+            disabled={sending || !input.trim()}
+          >
+            {sending ? "…" : "Send"}
+          </button>
+        </div>
       </footer>
     </div>
   );
