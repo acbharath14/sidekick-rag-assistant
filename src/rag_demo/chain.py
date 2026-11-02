@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from .config import Settings, get_llm, get_settings
-from .retriever import Hit, Retriever, format_citation
+from .retriever import Hit, Retriever
 from .rewrite import rewrite_query
 from .audit import log_question
 
@@ -17,10 +17,10 @@ SYSTEM = """You answer questions using ONLY the context below.
 For greetings or remarks that aren't questions (e.g. "hi", "thanks", "that's
 wonderful"), respond briefly and naturally without citations.
 For factual questions: if the context doesn't contain the answer, say you
-don't know. Cite the source + section for each fact you use, like [api-reference.md › Authentication]."""
+don't know. Cite the source for each fact you use, like [api-reference.md]."""
 
 SYSTEM_HYBRID = """You answer questions using the context below when it contains the answer.
-Cite the source + section for each fact you use, like [api-reference.md › Authentication].
+Cite the source for each fact you use, like [api-reference.md].
 For greetings or remarks that aren't questions (e.g. "hi", "thanks", "that's
 wonderful"), respond briefly and naturally without citations.
 If the context doesn't contain the answer to a factual question, answer from
@@ -181,33 +181,28 @@ class Answer:
     latency_ms: float | None = None
     grounded: bool = True  # False when answered from general knowledge (hybrid)
     standalone_question: str | None = None  # rewritten follow-up, if any
-    # Phase 5 (A2+A3): True when retrieval found candidates but the
-    # relevance floor dropped all of them — the answer is not grounded
-    # in any passing passage, so the UI must say so explicitly.
-    weak_evidence: bool = False
 
 
 def format_hits(hits: list[Hit]) -> str:
-    """Prompt context with passage-level citations (Phase 5): source +
-    section, not filename alone, so the model can cite precisely."""
-    return "\n\n".join(f"[{format_citation(h)}]\n{h.text}" for h in hits)
+    return "\n\n".join(f"[{h.source}]\n{h.text}" for h in hits)
 
 
-def _citation_sources(hits: list[Hit]) -> list[str]:
-    """Deduped, sorted passage citations for display and audit."""
-    return sorted({format_citation(h) for h in hits})
-
-
-def _weak_evidence(hits: list[Hit], retriever) -> bool:
-    """True when candidates existed but the floor dropped every one.
-    A duck-typed retriever without floor bookkeeping reports False."""
-    return not hits and getattr(retriever, "last_floor_dropped", 0) > 0
+def format_episodic(episodes: list[dict]) -> str:
+    """Format episodic memory hits as supplementary context, clearly labeled
+    as prior conversations (not current-turn history)."""
+    if not episodes:
+        return ""
+    lines = ["Prior conversations (for background only — the current question takes precedence):"]
+    for e in episodes:
+        lines.append(f"Q: {e['question']}\nA: {e['answer']}")
+    return "\n\n".join(lines)
 
 
 def build_chain(
     settings: Settings | None = None,
     retriever: Retriever | None = None,
     user_groups: list[str] | None = None,
+    episodic_context: str = "",
 ):
     settings = settings or get_settings()
     retriever = retriever or Retriever(settings)
@@ -225,9 +220,17 @@ def build_chain(
         ]
     )
     retrieve = RunnableLambda(lambda q: retriever.search(q, user_groups=groups))
+
+    def _format_context(hits: list[Hit]) -> str:
+        parts = []
+        if episodic_context:
+            parts.append(episodic_context)
+        parts.append(format_hits(hits))
+        return "\n\n".join(p for p in parts if p)
+
     chain = (
         {
-            "context": retrieve | RunnableLambda(format_hits),
+            "context": retrieve | RunnableLambda(_format_context),
             "question": RunnablePassthrough(),
         }
         | prompt
@@ -265,19 +268,19 @@ def ask(
             grounded=True,
             standalone_question=None,
         )
-    # Episodic memory: retrieve relevant past conversations and prepend
-    # to history. This enables long-term recall across sessions.
-    episodic_used = False
+    # Episodic memory: retrieve relevant past conversations as SUPPLEMENTARY
+    # context for the answer. It is deliberately NOT merged into `history`:
+    # history feeds query rewriting, and prior-session Q&As are not the
+    # current conversation — letting them drive the rewrite lets stale
+    # context override the user's actual question.
+    episodic_context = ""
     try:
-        from .caching import get_cached_episodic_memory
+        from .episodic import EpisodicMemory
 
-        _episodic = get_cached_episodic_memory(settings)
+        _episodic = EpisodicMemory(settings)
         _episodes = _episodic.search(question, k=3)
         if _episodes:
-            # Prepend as (question, answer) tuples, oldest first.
-            _ep_history = [(e["question"], e["answer"]) for e in reversed(_episodes)]
-            history = _ep_history + history
-            episodic_used = True
+            episodic_context = format_episodic(_episodes)
     except Exception:
         pass
     standalone = (
@@ -287,7 +290,10 @@ def ask(
     )
     started = time.perf_counter()
     chain, retriever, groups = build_chain(
-        settings, retriever=retriever, user_groups=user_groups
+        settings,
+        retriever=retriever,
+        user_groups=user_groups,
+        episodic_context=episodic_context,
     )
     text = chain.invoke(standalone)
     text = strip_think(text)
@@ -297,23 +303,23 @@ def ask(
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
     hits = retriever.search(standalone, user_groups=groups)
+    sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
-        sources=_citation_sources(hits),
+        sources=sources,
         hits=hits,
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
-        weak_evidence=_weak_evidence(hits, retriever),
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory for long-term recall (skip if it was a fallback
     # to avoid polluting memory with "I don't know" responses).
     if answer.grounded:
         try:
-            from .caching import get_cached_episodic_memory
+            from .episodic import EpisodicMemory
 
-            get_cached_episodic_memory(settings).add(question, text)
+            EpisodicMemory(settings).add(question, text)
         except Exception:
             pass
     return answer
@@ -348,15 +354,16 @@ def stream_ask(
             )
         }
         return
-    # Episodic memory: retrieve relevant past conversations.
+    # Episodic memory: supplementary context only — never merged into
+    # history, so it can't hijack the query rewrite (see ask()).
+    episodic_context = ""
     try:
-        from .caching import get_cached_episodic_memory
+        from .episodic import EpisodicMemory
 
-        _episodic = get_cached_episodic_memory(settings)
+        _episodic = EpisodicMemory(settings)
         _episodes = _episodic.search(question, k=3)
         if _episodes:
-            _ep_history = [(e["question"], e["answer"]) for e in reversed(_episodes)]
-            history = _ep_history + history
+            episodic_context = format_episodic(_episodes)
     except Exception:
         pass
     standalone = (
@@ -366,7 +373,10 @@ def stream_ask(
     )
     started = time.perf_counter()
     chain, retriever, groups = build_chain(
-        settings, retriever=retriever, user_groups=user_groups
+        settings,
+        retriever=retriever,
+        user_groups=user_groups,
+        episodic_context=episodic_context,
     )
     parts: list[str] = []
     think_filter = ThinkBlockFilter()
@@ -430,20 +440,19 @@ def stream_ask(
     hits = retriever.search(standalone, user_groups=groups)
     answer = Answer(
         text=text,
-        sources=_citation_sources(hits),
+        sources=sorted({h.source for h in hits}),
         hits=hits,
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
-        weak_evidence=_weak_evidence(hits, retriever),
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory (skip ungrounded fallbacks).
     if answer.grounded:
         try:
-            from .caching import get_cached_episodic_memory
+            from .episodic import EpisodicMemory
 
-            get_cached_episodic_memory(settings).add(question, text)
+            EpisodicMemory(settings).add(question, text)
         except Exception:
             pass
     yield {"answer": answer}
