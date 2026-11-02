@@ -33,11 +33,15 @@ Section summaries:
 Summary:"""
 
 
-def _invoke(llm, prompt: str, timeout: float = 120.0) -> str:
+def _invoke(llm, prompt: str, timeout: float | None = None) -> str:
     """Invoke the LLM with a timeout; returns '' on timeout/failure."""
     import concurrent.futures
+    import os
 
     from .chain import strip_think
+
+    if timeout is None:
+        timeout = float(os.environ.get("RAG_DEMO_SUMMARY_TIMEOUT", "600"))
 
     def _do():
         out = llm.invoke(prompt)
@@ -62,17 +66,23 @@ def summarize(text: str, settings: Settings | None = None) -> str:
     llm = get_llm(settings)
     if len(text) <= SINGLE_CALL_CHARS:
         result = _invoke(llm, SUMMARY_PROMPT.format(text=text))
-        return result or "Summary timed out — the document may be too long for this model."
+        return result or "Summary didn't complete — the model may be overloaded. Try again."
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_CHARS,
         chunk_overlap=200,
     )
     chunks = splitter.split_text(text)
     partials = []
-    for c in chunks:
+    for i, c in enumerate(chunks):
         p = _invoke(llm, MAP_PROMPT.format(chunk=c))
-        if p:  # skip timed-out chunks rather than failing the whole summary
+        if p:
             partials.append(p)
+        # else: skip timed-out chunks rather than failing the whole summary
     if not partials:
-        return "Summary timed out — the document may be too long for this model."
-    return _invoke(llm, REDUCE_PROMPT.format(summaries="\n\n".join(partials))) or "Summary timed out."
+        return "Summary didn't complete — the model may be overloaded. Try again."
+    if len(partials) < len(chunks):
+        partials.append(
+            f"_Note: {len(chunks) - len(partials)} of {len(chunks)} sections "
+            "couldn't be summarized in time and were skipped._"
+        )
+    return _invoke(llm, REDUCE_PROMPT.format(summaries="\n\n".join(partials))) or "Summary didn't complete — the model may be overloaded. Try again."
