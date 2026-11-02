@@ -275,6 +275,89 @@ leave the machine.
 PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock --incremental
 ```
 
+## React GUI (new)
+
+A modern **React + TypeScript + Vite** frontend backed by a **FastAPI**
+REST + SSE API. It augments the Streamlit UI — both talk to the same
+retrieval pipeline.
+
+### Run it
+
+```bash
+# One-shot: kills stale servers, starts backend (:8000) then frontend (:5173)
+./scripts/dev.sh
+
+# Prerequisite check (Ollama reachable? KEEP_ALIVE set?)
+./scripts/check_prereqs.sh
+```
+
+Backend at `http://127.0.0.1:8000`, frontend at `http://localhost:5173`.
+Ollama keeps models in memory when `OLLAMA_KEEP_ALIVE` is set (the
+prereq script warns if it isn't) — without it, every prompt pays a full
+model reload on CPU.
+
+### Features
+
+- **Multi-chat.** A sidebar lists your conversations. Start new ones,
+  rename, delete, switch between them. Conversations persist in SQLite
+  and survive restarts. Your last-open conversation is restored on load.
+- **Document cabinet.** A top-level *Documents* view — your browsable
+  library of uploaded files. Search by filename; each card shows the
+  filename, upload date, size, chunk count, and which extractor was used.
+  Click a document for a detail view: metadata, chunk preview, and the
+  LLM summary (regenerable).
+- **Upload.** Attach PDFs, DOCX, TXT, MD, or CSV — from the chat's 📎
+  button or the cabinet header. PDFs are extracted with a fallback chain
+  (pymupdf → pdfplumber → pypdf, inspired by
+  [doc-extract-eval](https://github.com/acbharath14/doc-extract-eval)).
+  A progress bar shows the byte transfer; documents are chunked and
+  indexed into the persistent FAISS store on upload.
+- **On-demand summarization.** Each document gets an LLM summary when
+  you ask for it (📝 Summarize), not during upload — long documents use
+  map-reduce (summarize each chunk, then combine). Configurable timeout
+  via `RAG_DEMO_SUMMARY_TIMEOUT` (default 600s) for CPU-speed models.
+- **Document-scoped chat.** "Chat about this document" from the cabinet
+  starts a conversation whose retrieval is limited to that document's
+  chunks.
+- **Chat niceties.** Copy-response button on every answer, message
+  timestamps, clear-chat, a pulsing *thinking* indicator while the model
+  works, and a Stop button to cancel a hung stream. Citations render as
+  pills, passages expand inline, and a context banner always shows the
+  active model and retrieval settings. Thumbs up/down feedback is
+  persisted for later review.
+
+### API endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/chat` | Non-streaming ask (optional `conversation_id`, `document_id`) |
+| POST | `/api/chat/stream` | SSE streaming ask (same options) |
+| GET | `/api/conversations` | List conversations |
+| POST | `/api/conversations` | Create a conversation |
+| GET | `/api/conversations/{id}` | Get a conversation with its messages |
+| PATCH | `/api/conversations/{id}` | Rename a conversation |
+| DELETE | `/api/conversations/{id}` | Delete a conversation |
+| DELETE | `/api/conversations/{id}/messages` | Clear a conversation's messages |
+| GET | `/api/documents` | List uploaded documents |
+| GET | `/api/documents/{id}` | Document detail + summary |
+| DELETE | `/api/documents/{id}` | Remove a document from the index |
+| POST | `/api/upload` | Upload a file (extract + index; fast) |
+| POST | `/api/upload/{id}/summarize` | Summarize an uploaded document (slow, on demand) |
+| GET | `/api/health` | Ollama reachability + index presence |
+| GET | `/api/config` | Safe settings subset (no secrets) |
+| POST | `/api/feedback` | Thumbs up/down vote |
+
+### Architecture note
+
+- **Conversations** live in SQLite at `{index_dir}/conversations.db`
+  (override with `RAG_DEMO_CONVERSATIONS_DB`). Messages, titles, and
+  document metadata persist across restarts.
+- **Uploaded documents** are chunked into the persistent FAISS index at
+  `index_dir` (same store as the demo corpus), so they survive restarts
+  and are searchable in every conversation.
+- **Episodic memory** still uses LanceDB, unchanged — it records past
+  Q&As for semantic recall across sessions.
+
 ## MCP client setup
 
 Add to your MCP client config (e.g. Claude Code):
