@@ -8,6 +8,11 @@ import os
 
 os.environ["RAG_DEMO_FAKE"] = "1"
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 from fastapi.testclient import TestClient
 
 from rag_demo.api import app
