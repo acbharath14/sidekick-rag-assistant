@@ -54,6 +54,7 @@ export interface ChatTurn {
   id: number;
   role: ChatRole;
   text: string;
+  createdAt: number;
   response?: ChatResponse;
   streaming?: boolean;
 }

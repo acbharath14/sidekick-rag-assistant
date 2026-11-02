@@ -14,7 +14,7 @@ import type {
   UploadResponse,
 } from "./types";
 import AttachButton from "./components/AttachButton";
-import ChatMessage from "./components/ChatMessage";
+import ChatMessage, { formatTime } from "./components/ChatMessage";
 import ContextBanner from "./components/ContextBanner";
 import HealthIndicator from "./components/HealthIndicator";
 import UploadBanner from "./components/UploadBanner";
@@ -119,8 +119,8 @@ export default function App() {
 
     setTurns((prev) => [
       ...prev,
-      { id: userId, role: "user", text: question },
-      { id: asstId, role: "assistant", text: "", streaming: true },
+      { id: userId, role: "user", text: question, createdAt: Date.now() },
+      { id: asstId, role: "assistant", text: "", createdAt: Date.now(), streaming: true },
     ]);
     setSending(true);
 
@@ -214,6 +214,17 @@ export default function App() {
     void clearUpload();
   };
 
+  const handleClearChat = (): void => {
+    if (turns.length === 0) return;
+    if (!window.confirm("Clear the conversation? This cannot be undone.")) return;
+    // Stop any in-flight stream; the active upload (if any) is left alone.
+    cancelRef.current?.();
+    cancelRef.current = null;
+    setSending(false);
+    setTurns([]);
+    setChatError(null);
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -225,12 +236,23 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>Sidekick</h1>
-        <HealthIndicator
-          health={health}
-          loading={healthLoading}
-          error={healthError}
-          onRetry={() => void loadHealth()}
-        />
+        <div className="header-actions">
+          <button
+            type="button"
+            className="clear-chat-btn"
+            onClick={handleClearChat}
+            disabled={turns.length === 0}
+            title="Clear the conversation"
+          >
+            Clear chat
+          </button>
+          <HealthIndicator
+            health={health}
+            loading={healthLoading}
+            error={healthError}
+            onRetry={() => void loadHealth()}
+          />
+        </div>
       </header>
       <ContextBanner
         config={config}
@@ -251,6 +273,9 @@ export default function App() {
           t.role === "user" ? (
             <article key={t.id} className="message message-user">
               <div className="message-body">{t.text}</div>
+              <div className="message-time message-time-user">
+                {formatTime(t.createdAt)}
+              </div>
             </article>
           ) : t.response ? (
             <ChatMessage
@@ -260,6 +285,7 @@ export default function App() {
                   ?.text ?? ""
               }
               response={t.response}
+              createdAt={t.createdAt}
               streamingText={t.text}
               isStreaming={t.streaming}
             />

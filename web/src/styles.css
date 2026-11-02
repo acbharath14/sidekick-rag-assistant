@@ -686,3 +686,56 @@ body {
   0%, 100% { opacity: 0.3; transform: scale(0.9); }
   50% { opacity: 1; transform: scale(1.1); }
 }
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.clear-chat-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-family: var(--font);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.clear-chat-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
+.clear-chat-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.copy-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-family: var(--font);
+  color: var(--text-muted);
+  padding: 2px 8px;
+}
+
+.copy-btn:hover {
+  color: var(--text);
+  background: var(--bg-soft);
+}
+
+.message-time {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.message-time-user {
+  text-align: right;
+  margin-top: 4px;
+}
