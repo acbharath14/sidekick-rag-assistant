@@ -3,6 +3,7 @@ import type {
   ConfigResponse,
   FeedbackResponse,
   HealthResponse,
+  SummarizeResponse,
   UploadResponse,
 } from "./types";
 
@@ -61,21 +62,69 @@ export function postFeedback(
   return postJson<FeedbackResponse>("/api/feedback", { question, vote });
 }
 
-export async function uploadFile(file: File): Promise<UploadResponse> {
-  const form = new FormData();
-  form.append("file", file, file.name);
-  const res = await fetch(`${API_BASE}/api/upload`, {
-    method: "POST",
-    body: form,
+export function uploadFile(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<UploadResponse> {
+  // XMLHttpRequest because fetch has no upload-progress events.
+  // Progress covers the byte transfer; the server then extracts text and
+  // builds the index synchronously, so 100% means "waiting on the server".
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append("file", file, file.name);
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(
+          new Error(`POST /api/upload failed: ${xhr.status} ${xhr.statusText}`),
+        );
+        return;
+      }
+      let data: UploadResponse;
+      try {
+        data = JSON.parse(xhr.responseText) as UploadResponse;
+      } catch {
+        reject(new Error("Upload failed: invalid server response"));
+        return;
+      }
+      if (!data.ok) {
+        reject(new Error(data.error ?? "Upload failed"));
+        return;
+      }
+      resolve(data);
+    });
+
+    xhr.addEventListener("error", () =>
+      reject(new Error("Upload failed: network error")),
+    );
+    xhr.addEventListener("abort", () =>
+      reject(new Error("Upload cancelled")),
+    );
+    xhr.addEventListener("timeout", () =>
+      reject(new Error("Upload timed out")),
+    );
+
+    xhr.open("POST", `${API_BASE}/api/upload`);
+    xhr.send(form);
   });
-  if (!res.ok) {
-    throw new Error(`POST /api/upload failed: ${res.status} ${res.statusText}`);
-  }
-  const data = (await res.json()) as UploadResponse;
+}
+
+export async function summarizeUpload(uploadId: string): Promise<string> {
+  const data = await postJson<SummarizeResponse>(
+    `/api/upload/${encodeURIComponent(uploadId)}/summarize`,
+    {},
+  );
   if (!data.ok) {
-    throw new Error(data.error ?? "Upload failed");
+    throw new Error(data.error ?? "Summarize failed");
   }
-  return data;
+  return data.summary;
 }
 
 export async function deleteUpload(uploadId: string): Promise<void> {

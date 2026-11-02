@@ -3,15 +3,18 @@ import { useRef } from "react";
 interface Props {
   onFile: (file: File) => void;
   disabled: boolean;
-  uploading: boolean;
+  /** Upload progress 0–100 while a file is uploading; null otherwise. */
+  progress: number | null;
 }
 
 const ACCEPT = ".pdf,.docx,.txt,.md,.csv";
 
-export default function AttachButton({ onFile, disabled, uploading }: Props) {
+export default function AttachButton({ onFile, disabled, progress }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const uploading = progress !== null;
 
   const pick = (): void => {
+    if (uploading) return;
     inputRef.current?.click();
   };
 
@@ -36,14 +39,25 @@ export default function AttachButton({ onFile, disabled, uploading }: Props) {
         type="button"
         className="attach-button"
         onClick={pick}
-        disabled={disabled || uploading}
-        aria-label="Attach a document"
-        title="Attach a document (PDF, DOCX, TXT, MD, CSV)"
+        disabled={disabled}
+        aria-label={
+          uploading
+            ? `Uploading document… ${progress}%`
+            : "Attach a document"
+        }
+        title={
+          uploading
+            ? `Uploading… ${progress}%`
+            : "Attach a document (PDF, DOCX, TXT, MD, CSV)"
+        }
       >
-        {uploading ? (
-          <span className="attach-spinner" aria-hidden="true" />
-        ) : (
-          <span aria-hidden="true">📎</span>
+        <span aria-hidden="true">📎</span>
+        {uploading && (
+          <span
+            className="attach-progress"
+            style={{ width: `${progress}%` }}
+            aria-hidden="true"
+          />
         )}
       </button>
     </>

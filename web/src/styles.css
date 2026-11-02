@@ -475,6 +475,8 @@ body {
   align-self: stretch;
   display: flex;
   align-items: center;
+  position: relative;
+  overflow: hidden;
 }
 
 .attach-button:disabled {
@@ -482,20 +484,13 @@ body {
   cursor: default;
 }
 
-.attach-spinner {
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: attach-spin 0.8s linear infinite;
-  display: inline-block;
-}
-
-@keyframes attach-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.attach-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--accent);
+  transition: width 0.15s ease;
 }
 
 .upload-card {
@@ -571,6 +566,50 @@ body {
 .upload-card-actions {
   display: flex;
   gap: 8px;
+}
+
+.upload-card-summarize {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-card-summarize:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.summarize-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: summarize-spin 0.8s linear infinite;
+  display: inline-block;
+}
+
+@keyframes summarize-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.upload-card-summary-error {
+  background: var(--error-bg);
+  color: var(--error-text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
 }
 
 .upload-card-chat {

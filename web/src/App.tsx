@@ -34,7 +34,7 @@ export default function App() {
   const [healthError, setHealthError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [upload, setUpload] = useState<UploadResponse | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [activeUploadId, setActiveUploadId] = useState<string | null>(null);
   const cancelRef = useRef<(() => void) | null>(null);
@@ -163,21 +163,21 @@ export default function App() {
   };
 
   const handleFile = async (file: File): Promise<void> => {
-    if (uploading) return;
+    if (uploadProgress !== null) return;
     if (upload) {
       await deleteUpload(upload.upload_id);
     }
     setUpload(null);
     setActiveUploadId(null);
     setUploadError(null);
-    setUploading(true);
+    setUploadProgress(0);
     try {
-      const res = await uploadFile(file);
+      const res = await uploadFile(file, setUploadProgress);
       setUpload(res);
     } catch (err) {
       setUploadError((err as Error).message);
     } finally {
-      setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -284,7 +284,7 @@ export default function App() {
           <AttachButton
             onFile={(f) => void handleFile(f)}
             disabled={false}
-            uploading={uploading}
+            progress={uploadProgress}
           />
           <textarea
             value={input}

@@ -38,6 +38,12 @@ export interface UploadResponse {
   filename: string;
   char_count: number;
   chunk_count: number;
+  extractor: string;
+  error?: string;
+}
+
+export interface SummarizeResponse {
+  ok: boolean;
   summary: string;
   error?: string;
 }
