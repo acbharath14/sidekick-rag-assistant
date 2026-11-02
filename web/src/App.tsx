@@ -95,6 +95,17 @@ export default function App() {
     return out;
   };
 
+  const handleStop = (): void => {
+    cancelRef.current?.();
+    cancelRef.current = null;
+    setSending(false);
+    setTurns((prev) =>
+      prev.map((t) =>
+        t.streaming ? { ...t, streaming: false, text: t.text + "\n\n*[stopped]*" } : t,
+      ),
+    );
+  };
+
   const send = (): void => {
     const question = input.trim();
     if (!question || sending) return;
@@ -302,10 +313,10 @@ export default function App() {
           <button
             type="button"
             className="send-button"
-            onClick={send}
-            disabled={sending || !input.trim()}
+            onClick={sending ? handleStop : send}
+            disabled={!sending && !input.trim()}
           >
-            {sending ? "…" : "Send"}
+            {sending ? "Stop" : "Send"}
           </button>
         </div>
       </footer>
