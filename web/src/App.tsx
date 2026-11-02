@@ -163,7 +163,7 @@ export default function App() {
   };
 
   const handleFile = async (file: File): Promise<void> => {
-    if (uploading || sending) return;
+    if (uploading) return;
     if (upload) {
       await deleteUpload(upload.upload_id);
     }
@@ -283,7 +283,7 @@ export default function App() {
         <div className="composer-row">
           <AttachButton
             onFile={(f) => void handleFile(f)}
-            disabled={sending}
+            disabled={false}
             uploading={uploading}
           />
           <textarea
