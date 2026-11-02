@@ -36,6 +36,7 @@ app = FastAPI(title="Sidekick RAG API")
 # In-memory upload indexes, keyed by upload_id. Nothing is written to disk.
 _upload_retrievers: dict[str, Any] = {}
 _upload_names: dict[str, str] = {}
+_upload_texts: dict[str, str] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -147,9 +148,10 @@ def feedback(req: FeedbackRequest) -> dict:
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)) -> dict:
-    """Upload a document: extract text, summarize, build an in-memory index.
-    Returns an upload_id for subsequent /api/chat calls. Nothing is written
-    to disk."""
+    """Upload a document: extract text and build an in-memory index.
+    Returns an upload_id for subsequent /api/chat calls. Summarization is
+    a separate POST /api/upload/{id}/summarize call so the upload itself
+    stays fast. Nothing is written to disk."""
     from .extract import UnsupportedFormat, extract_text_with_meta
 
     settings = get_settings()
@@ -165,13 +167,6 @@ async def upload(file: UploadFile = File(...)) -> dict:
         return {"ok": False, "error": f"Couldn't read {file.filename}: {e}"}
     if not text.strip():
         return {"ok": False, "error": f"No text found in {file.filename}."}
-    # Summarize.
-    from .summarize import summarize
-
-    try:
-        summary = summarize(text, settings)
-    except Exception as e:
-        summary = f"Summarize failed: {type(e).__name__}: {e}"
     # Build an in-memory index for follow-up questions.
     from langchain_community.vectorstores import FAISS
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -194,6 +189,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
     upload_id = uuid.uuid4().hex[:12]
     _upload_retrievers[upload_id] = Retriever(settings, store=store, chunks=chunk_dicts)
     _upload_names[upload_id] = file.filename or "upload"
+    _upload_texts[upload_id] = text
     return {
         "ok": True,
         "upload_id": upload_id,
@@ -201,14 +197,30 @@ async def upload(file: UploadFile = File(...)) -> dict:
         "char_count": len(text),
         "chunk_count": len(chunks),
         "extractor": extractor,
-        "summary": summary,
     }
+
+
+@app.post("/api/upload/{upload_id}/summarize")
+def summarize_upload(upload_id: str) -> dict:
+    """Summarize a previously uploaded document via the LLM. Slow on CPU —
+    called on demand from the UI, not during upload."""
+    text = _upload_texts.get(upload_id)
+    if not text:
+        return {"ok": False, "error": "Upload not found or expired."}
+    from .summarize import summarize
+
+    try:
+        summary = summarize(text, get_settings())
+    except Exception as e:
+        return {"ok": False, "error": f"Summarize failed: {type(e).__name__}: {e}"}
+    return {"ok": True, "summary": summary or "Summary returned empty."}
 
 
 @app.delete("/api/upload/{upload_id}")
 def delete_upload(upload_id: str) -> dict:
     _upload_retrievers.pop(upload_id, None)
     _upload_names.pop(upload_id, None)
+    _upload_texts.pop(upload_id, None)
     return {"ok": True}
 
 
