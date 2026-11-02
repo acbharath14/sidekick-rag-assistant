@@ -34,11 +34,38 @@ export interface FeedbackResponse {
 
 export interface UploadResponse {
   ok: boolean;
-  upload_id: string;
+  id: string;
   filename: string;
   char_count: number;
   chunk_count: number;
+  file_size: number;
   extractor: string;
+  summary: string | null;
+  uploaded_at: number;
+  error?: string;
+}
+
+export interface DocumentInfo {
+  id: string;
+  filename: string;
+  chunk_count: number;
+  char_count: number;
+  file_size: number;
+  extractor: string;
+  has_summary: boolean;
+  uploaded_at: number;
+}
+
+export interface DocumentDetail {
+  ok: boolean;
+  id: string;
+  filename: string;
+  chunk_count: number;
+  char_count: number;
+  file_size: number;
+  extractor: string;
+  summary: string | null;
+  uploaded_at: number;
   error?: string;
 }
 
@@ -57,4 +84,33 @@ export interface ChatTurn {
   createdAt: number;
   response?: ChatResponse;
   streaming?: boolean;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  message_count: number;
+}
+
+export interface ConversationMessage {
+  role: ChatRole;
+  text: string;
+  sources: string[];
+  grounded: boolean | null;
+  latency_ms: number | null;
+  created_at: number;
+}
+
+export interface ConversationDetail {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  messages: ConversationMessage[];
+}
+
+export interface ChatResponseWithTitle extends ChatResponse {
+  conversation_title?: string;
 }

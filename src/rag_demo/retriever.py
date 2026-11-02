@@ -278,11 +278,14 @@ class Retriever:
         k: int | None = None,
         rerank: bool | None = None,
         user_groups: list[str] | None = None,
+        source_filter: str | None = None,
     ) -> list[Hit]:
         """user_groups: groups the asker belongs to. ACL is default-deny:
         public ("*") hits are visible to everyone; restricted hits require an
         explicit group match. Filtering happens BEFORE the prompt — never rely
-        on the LLM to withhold what it has seen."""
+        on the LLM to withhold what it has seen.
+        source_filter: when set, only hits whose source matches exactly are
+        returned (used for document-scoped chat)."""
         k = k or self.settings.top_k
         rerank = self.settings.rerank_enabled if rerank is None else rerank
         if user_groups is None:
@@ -302,6 +305,8 @@ class Retriever:
             for h in hits
             if "*" in h.allowed_groups or groups & set(h.allowed_groups)
         ]
+        if source_filter is not None:
+            hits = [h for h in hits if h.source == source_filter]
         # Phase 5 (A2+A3) relevance floor. The floor runs on the full
         # candidate pool BEFORE trimming to k, so a passing hit beyond
         # the first k is not lost to a failing one. The score kind is

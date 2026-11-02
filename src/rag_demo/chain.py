@@ -203,12 +203,15 @@ def build_chain(
     retriever: Retriever | None = None,
     user_groups: list[str] | None = None,
     episodic_context: str = "",
+    document_id: str | None = None,
 ):
     settings = settings or get_settings()
     retriever = retriever or Retriever(settings)
     # Resolve groups once: the SAME filtered hits feed the prompt AND the
     # returned answer. Never let the LLM see what the user may not.
     groups = user_groups if user_groups is not None else settings.user_groups
+    # Document-scoped chat: only retrieve chunks from this document's source.
+    source_filter = f"upload:{document_id}" if document_id else None
     system = SYSTEM_HYBRID if settings.hybrid_fallback else SYSTEM
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -219,7 +222,11 @@ def build_chain(
             ),
         ]
     )
-    retrieve = RunnableLambda(lambda q: retriever.search(q, user_groups=groups))
+    retrieve = RunnableLambda(
+        lambda q: retriever.search(
+            q, user_groups=groups, source_filter=source_filter
+        )
+    )
 
     def _format_context(hits: list[Hit]) -> str:
         parts = []
@@ -246,11 +253,13 @@ def ask(
     history: list[tuple[str, str]] | None = None,
     user_groups: list[str] | None = None,
     retriever: Retriever | None = None,
+    document_id: str | None = None,
 ) -> Answer:
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
     settings.user_groups). retriever: inject a pre-built retriever (e.g.
-    an in-memory upload index)."""
+    an in-memory upload index). document_id: scope retrieval to a single
+    uploaded document's chunks."""
     import time
 
     settings = settings or get_settings()
@@ -289,11 +298,13 @@ def ask(
         else question
     )
     started = time.perf_counter()
+    source_filter = f"upload:{document_id}" if document_id else None
     chain, retriever, groups = build_chain(
         settings,
         retriever=retriever,
         user_groups=user_groups,
         episodic_context=episodic_context,
+        document_id=document_id,
     )
     text = chain.invoke(standalone)
     text = strip_think(text)
@@ -302,7 +313,9 @@ def ask(
     if settings.hybrid_fallback and is_abstention(text):
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
-    hits = retriever.search(standalone, user_groups=groups)
+    hits = retriever.search(
+        standalone, user_groups=groups, source_filter=source_filter
+    )
     sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
@@ -331,6 +344,7 @@ def stream_ask(
     history: list[tuple[str, str]] | None = None,
     user_groups: list[str] | None = None,
     retriever: Retriever | None = None,
+    document_id: str | None = None,
 ):
     """Streaming variant of ask(). Yields {"token": str} chunks as the LLM
     generates, then a final {"answer": Answer}. Powers st.write_stream."""
@@ -372,11 +386,13 @@ def stream_ask(
         else question
     )
     started = time.perf_counter()
+    source_filter = f"upload:{document_id}" if document_id else None
     chain, retriever, groups = build_chain(
         settings,
         retriever=retriever,
         user_groups=user_groups,
         episodic_context=episodic_context,
+        document_id=document_id,
     )
     parts: list[str] = []
     think_filter = ThinkBlockFilter()
@@ -437,7 +453,9 @@ def stream_ask(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
-    hits = retriever.search(standalone, user_groups=groups)
+    hits = retriever.search(
+        standalone, user_groups=groups, source_filter=source_filter
+    )
     answer = Answer(
         text=text,
         sources=sorted({h.source for h in hits}),

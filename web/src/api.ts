@@ -1,9 +1,12 @@
 import type {
   ChatResponse,
   ConfigResponse,
+  Conversation,
+  ConversationDetail,
+  DocumentDetail,
+  DocumentInfo,
   FeedbackResponse,
   HealthResponse,
-  SummarizeResponse,
   UploadResponse,
 } from "./types";
 
@@ -35,6 +38,26 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function patchJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`PATCH ${path} failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function deleteJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) {
+    throw new Error(`DELETE ${path} failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as T;
+}
+
 export function fetchHealth(): Promise<HealthResponse> {
   return getJson<HealthResponse>("/api/health");
 }
@@ -46,12 +69,14 @@ export function fetchConfig(): Promise<ConfigResponse> {
 export function postChat(
   question: string,
   history: Array<[string, string]>,
-  uploadId?: string | null,
+  documentId?: string | null,
+  conversationId?: string | null,
 ): Promise<ChatResponse> {
   return postJson<ChatResponse>("/api/chat", {
     question,
     history,
-    upload_id: uploadId ?? null,
+    document_id: documentId ?? null,
+    conversation_id: conversationId ?? null,
   });
 }
 
@@ -117,24 +142,96 @@ export function uploadFile(
 }
 
 export async function summarizeUpload(uploadId: string): Promise<string> {
-  const data = await postJson<SummarizeResponse>(
-    `/api/upload/${encodeURIComponent(uploadId)}/summarize`,
+  // Legacy alias — the cabinet now uses summarizeDocument.
+  return summarizeDocument(uploadId);
+}
+
+export interface DocumentListResponse {
+  documents: DocumentInfo[];
+}
+
+export function listDocuments(): Promise<DocumentListResponse> {
+  return getJson<DocumentListResponse>("/api/documents");
+}
+
+export async function getDocument(id: string): Promise<DocumentDetail> {
+  const data = await getJson<DocumentDetail>(
+    `/api/documents/${encodeURIComponent(id)}`,
+  );
+  if (!data.ok) throw new Error(data.error ?? "Document not found");
+  return data;
+}
+
+export async function summarizeDocument(docId: string): Promise<string> {
+  const data = await postJson<{ ok: boolean; summary: string; error?: string }>(
+    `/api/documents/${encodeURIComponent(docId)}/summarize`,
     {},
   );
-  if (!data.ok) {
-    throw new Error(data.error ?? "Summarize failed");
-  }
+  if (!data.ok) throw new Error(data.error ?? "Summarize failed");
   return data.summary;
 }
 
-export async function deleteUpload(uploadId: string): Promise<void> {
-  try {
-    await fetch(`${API_BASE}/api/upload/${encodeURIComponent(uploadId)}`, {
-      method: "DELETE",
-    });
-  } catch {
-    // Best-effort cleanup; the server holds uploads in memory only.
-  }
+export async function deleteDocument(docId: string): Promise<void> {
+  const data = await deleteJson<OkResponse>(
+    `/api/documents/${encodeURIComponent(docId)}`,
+  );
+  if (!data.ok) throw new Error(data.error ?? "Delete failed");
+}
+
+// --- Conversations ---
+
+export interface ConversationListResponse {
+  conversations: Conversation[];
+}
+
+export function listConversations(): Promise<ConversationListResponse> {
+  return getJson<ConversationListResponse>("/api/conversations");
+}
+
+export interface CreateConversationResponse {
+  id: string;
+  title: string;
+  created_at: number;
+}
+
+export function createConversation(title?: string): Promise<CreateConversationResponse> {
+  return postJson<CreateConversationResponse>(
+    "/api/conversations",
+    title ? { title } : {},
+  );
+}
+
+export function getConversation(id: string): Promise<ConversationDetail> {
+  return getJson<ConversationDetail>(
+    `/api/conversations/${encodeURIComponent(id)}`,
+  );
+}
+
+export interface OkResponse {
+  ok: boolean;
+  error?: string;
+}
+
+export async function renameConversation(id: string, title: string): Promise<void> {
+  const data = await patchJson<OkResponse>(
+    `/api/conversations/${encodeURIComponent(id)}`,
+    { title },
+  );
+  if (!data.ok) throw new Error(data.error ?? "Rename failed");
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  const data = await deleteJson<OkResponse>(
+    `/api/conversations/${encodeURIComponent(id)}`,
+  );
+  if (!data.ok) throw new Error(data.error ?? "Delete failed");
+}
+
+export async function clearConversationMessages(id: string): Promise<void> {
+  const data = await deleteJson<OkResponse>(
+    `/api/conversations/${encodeURIComponent(id)}/messages`,
+  );
+  if (!data.ok) throw new Error(data.error ?? "Clear failed");
 }
 
 export interface StreamCallbacks {
@@ -147,7 +244,8 @@ export function streamChat(
   question: string,
   history: Array<[string, string]>,
   cb: StreamCallbacks,
-  uploadId?: string | null,
+  documentId?: string | null,
+  conversationId?: string | null,
 ): () => void {
   const ctrl = new AbortController();
   let buffer = "";
@@ -160,7 +258,8 @@ export function streamChat(
         body: JSON.stringify({
           question,
           history,
-          upload_id: uploadId ?? null,
+          document_id: documentId ?? null,
+          conversation_id: conversationId ?? null,
         }),
         signal: ctrl.signal,
       });
