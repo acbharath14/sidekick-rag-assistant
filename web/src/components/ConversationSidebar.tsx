@@ -129,8 +129,14 @@ export default function ConversationSidebar({
                 disabled={busyId === c.id}
               >
                 <span className="sidebar-item-title">{c.title}</span>
+                {c.last_message && (
+                  <span className="sidebar-item-preview">
+                    {c.last_message.length > 60
+                      ? c.last_message.slice(0, 60).trimEnd() + "…"
+                      : c.last_message}
+                  </span>
+                )}
                 <span className="sidebar-item-meta">
-                  {c.message_count > 0 && `${c.message_count} msgs · `}
                   {relativeTime(c.updated_at)}
                 </span>
               </button>

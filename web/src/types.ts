@@ -92,6 +92,8 @@ export interface Conversation {
   created_at: number;
   updated_at: number;
   message_count: number;
+  last_message: string | null;
+  last_message_at: number | null;
 }
 
 export interface ConversationMessage {

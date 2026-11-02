@@ -100,7 +100,13 @@ def list_conversations() -> list[dict]:
         rows = conn.execute(
             """
             SELECT c.id, c.title, c.created_at, c.updated_at,
-                   COUNT(m.id) AS message_count
+                   COUNT(m.id) AS message_count,
+                   (SELECT text FROM messages m2
+                     WHERE m2.conversation_id = c.id
+                     ORDER BY m2.id DESC LIMIT 1) AS last_message,
+                   (SELECT created_at FROM messages m3
+                     WHERE m3.conversation_id = c.id
+                     ORDER BY m3.id DESC LIMIT 1) AS last_message_at
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id = c.id
             GROUP BY c.id
@@ -114,6 +120,8 @@ def list_conversations() -> list[dict]:
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
             "message_count": r["message_count"],
+            "last_message": r["last_message"],
+            "last_message_at": r["last_message_at"],
         }
         for r in rows
     ]
