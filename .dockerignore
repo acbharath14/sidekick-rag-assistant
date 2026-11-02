@@ -1,0 +1,17 @@
+# Shared by Dockerfile.backend and Dockerfile.frontend (single build context: repo root).
+.git
+__pycache__
+*.pyc
+*.pyo
+.venv
+.pytest_cache
+.mypy_cache
+web/node_modules
+web/dist
+.faiss_index
+.lancedb_episodic
+conversations.db
+*.log
+.DS_Store
+.idea
+.vscode
