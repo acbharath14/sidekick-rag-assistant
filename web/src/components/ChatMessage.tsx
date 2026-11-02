@@ -44,8 +44,16 @@ export default function ChatMessage({
         </div>
       )}
       <div className="message-body">
-        <ReactMarkdown>{text}</ReactMarkdown>
-        {isStreaming && <span className="caret" aria-hidden="true" />}
+        {isStreaming && !text ? (
+          <span className="thinking" aria-label="Model is thinking">
+            <span className="thinking-dot" />
+            <span className="thinking-dot" />
+            <span className="thinking-dot" />
+          </span>
+        ) : (
+          <ReactMarkdown>{text}</ReactMarkdown>
+        )}
+        {isStreaming && !!text && <span className="caret" aria-hidden="true" />}
       </div>
       {response.sources.length > 0 && (
         <div className="citations" aria-label="Cited sources">
