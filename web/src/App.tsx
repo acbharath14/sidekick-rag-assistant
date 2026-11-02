@@ -193,7 +193,8 @@ export default function App() {
       cancelRef.current = null;
       setSending(false);
       setChatError(null);
-      // Note: upload card stays — documents are persistent, not per-conversation.
+      setUpload(null);
+      setUploadError(null);
       // Switching conversations clears any document scope.
       setActiveDocumentId(null);
       setActiveDocumentName(null);
