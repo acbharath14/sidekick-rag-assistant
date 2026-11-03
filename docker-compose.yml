@@ -1,0 +1,57 @@
+name: sidekick
+
+services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      # Smoke-test mode: deterministic fake embeddings + fake LLM, so the
+      # stack boots with no model download. For real local-LLM answers,
+      # remove this line and `docker exec sidekick-ollama-1 ollama pull qwen3:8b`.
+      RAG_DEMO_FAKE: "1"
+      RAG_DEMO_INDEX_DIR: /data/index
+    volumes:
+      # /data holds the FAISS index, conversations.db, and LanceDB episodic
+      # memory (RAG_DEMO_INDEX_DIR=/data/index; lancedb sits at /data/.lancedb_episodic).
+      - sidekick_data:/data
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # Baked into the JS bundle at build time; must be reachable from the
+        # *browser*, not from inside the container network.
+        VITE_API_URL: http://localhost:8000
+    ports:
+      # Host 8080 -> container 80 (avoids needing root for host port 80).
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
+  sidekick_data:
