@@ -57,6 +57,7 @@ def test_list_ordering_newest_first():
     for c in convs:
         assert set(c.keys()) == {
             "id", "title", "created_at", "updated_at", "message_count",
+            "last_message", "last_message_at",
         }
 
 
