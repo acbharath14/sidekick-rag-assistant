@@ -14,14 +14,21 @@ const API_BASE: string =
   (import.meta.env.VITE_API_URL as string | undefined) ??
   "http://127.0.0.1:8000";
 
+const API_KEY: string | undefined =
+  (import.meta.env.VITE_API_KEY as string | undefined) || undefined;
+
 export function apiBase(): string {
   return API_BASE;
+}
+
+function authHeaders(): Record<string, string> {
+  return API_KEY ? { "X-API-Key": API_KEY } : {};
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -31,7 +38,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { ...authHeaders() },
+  });
   if (!res.ok) {
     throw new Error(`GET ${path} failed: ${res.status} ${res.statusText}`);
   }
@@ -41,7 +50,7 @@ async function getJson<T>(path: string): Promise<T> {
 async function patchJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -51,7 +60,10 @@ async function patchJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function deleteJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: { ...authHeaders() },
+  });
   if (!res.ok) {
     throw new Error(`DELETE ${path} failed: ${res.status} ${res.statusText}`);
   }
@@ -137,6 +149,7 @@ export function uploadFile(
     );
 
     xhr.open("POST", `${API_BASE}/api/upload`);
+    if (API_KEY) xhr.setRequestHeader("X-API-Key", API_KEY);
     xhr.send(form);
   });
 }
@@ -254,7 +267,7 @@ export function streamChat(
     try {
       const res = await fetch(`${API_BASE}/api/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
           question,
           history,
