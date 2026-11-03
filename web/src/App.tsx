@@ -297,23 +297,7 @@ export default function App() {
     setTurns((prev) => [
       ...prev,
       { id: userId, role: "user", text: question, createdAt: Date.now() },
-      {
-        id: asstId,
-        role: "assistant",
-        text: "",
-        createdAt: Date.now(),
-        streaming: true,
-        // Empty response so ChatMessage mounts immediately and shows the
-        // thinking indicator; onDone replaces it with the real response.
-        response: {
-          text: "",
-          sources: [],
-          hits: [],
-          grounded: true,
-          latency_ms: null,
-          standalone_question: null,
-        },
-      },
+      { id: asstId, role: "assistant", text: "", createdAt: Date.now(), streaming: true },
     ]);
     setSending(true);
 
