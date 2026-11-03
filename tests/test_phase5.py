@@ -251,7 +251,7 @@ def test_ask_marks_weak_evidence_when_floor_drops_everything():
         last_floor_dropped = 2
         last_candidates = 2
 
-        def search(self, query, user_groups=None):
+        def search(self, query, user_groups=None, source_filter=None):
             return []
 
     answer = ask("anything at all", get_settings(), retriever=FloorStubRetriever())
