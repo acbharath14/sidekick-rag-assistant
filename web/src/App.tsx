@@ -521,6 +521,14 @@ export default function App() {
           </nav>
         </div>
         <div className="header-actions">
+          {sending && (
+            <span className="processing-pill" aria-live="polite">
+              <span className="thinking-dot" />
+              <span className="thinking-dot" />
+              <span className="thinking-dot" />
+              Processing…
+            </span>
+          )}
           {view === "chat" && (
             <button
               type="button"

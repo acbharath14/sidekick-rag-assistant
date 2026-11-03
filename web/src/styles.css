@@ -697,6 +697,22 @@ body {
   50% { opacity: 1; transform: scale(1.1); }
 }
 
+.processing-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-radius: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.processing-pill .thinking-dot {
+  width: 6px;
+  height: 6px;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
