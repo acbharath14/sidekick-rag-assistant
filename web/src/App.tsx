@@ -587,10 +587,11 @@ export default function App() {
           <>
         {turns.length === 0 && (
           <div className="empty-state">
-            <p>Ask a question about the indexed corpus.</p>
+            <p>Ask anything.</p>
             <p className="empty-hint">
-              Answers stream in with cited sources. Thumbs up/down saves
-              feedback for later review.
+              Sidekick searches your documents first and answers with cited
+              sources — or from general knowledge when the corpus has no
+              answer. Thumbs up/down saves feedback for later review.
             </p>
           </div>
         )}
