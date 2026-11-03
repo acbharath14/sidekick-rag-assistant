@@ -107,6 +107,14 @@ export default function ChatMessage({
           General knowledge — not from the corpus
         </span>
       )}
+      {response.weak_evidence && response.grounded && (
+        <span
+          className="fallback-badge"
+          title="The relevance filter removed all retrieved passages; treat this answer with caution"
+        >
+          ⚠ Weak evidence — no strong sources found
+        </span>
+      )}
       {response.standalone_question && (
         <div
           className="standalone-note"
