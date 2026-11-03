@@ -105,6 +105,7 @@ def _answer_to_wire(a: Answer) -> dict:
         "grounded": a.grounded,
         "latency_ms": a.latency_ms,
         "standalone_question": a.standalone_question,
+        "weak_evidence": a.weak_evidence,
     }
 
 
