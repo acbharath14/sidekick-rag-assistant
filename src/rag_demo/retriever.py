@@ -194,15 +194,22 @@ class Retriever:
             self.chunks = chunks or []
         else:
             if not self.settings.index_dir.exists():
-                raise RuntimeError(
-                    f"index not found at {self.settings.index_dir} — run `python -m rag_demo.ingest` first"
+                if self.settings.fake:
+                    # Fake tier (tests/CI): no index on disk — empty stub so
+                    # API shape tests pass without running ingest first.
+                    self.store = None
+                    self.chunks = []
+                else:
+                    raise RuntimeError(
+                        f"index not found at {self.settings.index_dir} — run `python -m rag_demo.ingest` first"
+                    )
+            else:
+                self.store = FAISS.load_local(
+                    str(self.settings.index_dir),
+                    embeddings if embeddings is not None else get_embeddings(self.settings),
+                    allow_dangerous_deserialization=True,
                 )
-            self.store = FAISS.load_local(
-                str(self.settings.index_dir),
-                embeddings if embeddings is not None else get_embeddings(self.settings),
-                allow_dangerous_deserialization=True,
-            )
-            self.chunks = self._load_chunks()
+                self.chunks = self._load_chunks()
         # Phase 5 (A2+A3): an index built before chunk-level citations
         # lacks chunk_id/section metadata. It still answers, but citations
         # degrade to filename-only — so flag it instead of silently
@@ -212,7 +219,7 @@ class Retriever:
         if store is None:
             self.index_stale = not _index_format_current(self.settings.index_dir)
         self.bm25 = None
-        if self.settings.retrieval == "hybrid":
+        if self.settings.retrieval == "hybrid" and self.chunks:
             if BM25Okapi is None:
                 raise RuntimeError(
                     "hybrid retrieval needs the rank-bm25 package — pip install -r requirements.txt"
@@ -286,6 +293,11 @@ class Retriever:
         on the LLM to withhold what it has seen.
         source_filter: when set, only hits whose source matches exactly are
         returned (used for document-scoped chat)."""
+        if self.store is None:
+            # Fake tier: no index — nothing to retrieve.
+            self.last_candidates = 0
+            self.last_floor_dropped = 0
+            return []
         k = k or self.settings.top_k
         rerank = self.settings.rerank_enabled if rerank is None else rerank
         if user_groups is None:
