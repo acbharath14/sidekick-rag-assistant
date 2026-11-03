@@ -181,6 +181,15 @@ class Answer:
     latency_ms: float | None = None
     grounded: bool = True  # False when answered from general knowledge (hybrid)
     standalone_question: str | None = None  # rewritten follow-up, if any
+    weak_evidence: bool = False  # True when the relevance floor dropped every candidate
+
+
+def _weak_evidence(retriever) -> bool:
+    """True when the relevance floor dropped every retrieved candidate —
+    the answer was produced with no surviving evidence."""
+    candidates = getattr(retriever, "last_candidates", 0) or 0
+    dropped = getattr(retriever, "last_floor_dropped", 0) or 0
+    return candidates > 0 and dropped >= candidates
 
 
 def format_hits(hits: list[Hit]) -> str:
@@ -324,6 +333,7 @@ def ask(
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
+        weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory for long-term recall (skip if it was a fallback
@@ -463,6 +473,7 @@ def stream_ask(
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
+        weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory (skip ungrounded fallbacks).
