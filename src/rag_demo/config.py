@@ -173,4 +173,5 @@ def get_llm(settings: Settings):
         base_url=settings.ollama_base_url,
         timeout=300.0,  # fail fast instead of hanging forever on a stalled server
         keep_alive="30m",  # keep the model in RAM between prompts; avoids reload stalls
+        think=False,  # qwen3 is a thinking model; skip hidden reasoning for fast answers
     )
