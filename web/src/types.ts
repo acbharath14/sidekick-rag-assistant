@@ -11,6 +11,7 @@ export interface ChatResponse {
   grounded: boolean;
   latency_ms: number | null;
   standalone_question: string | null;
+  weak_evidence?: boolean;
 }
 
 export interface HealthResponse {
