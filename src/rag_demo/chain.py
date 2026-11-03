@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from .config import Settings, get_llm, get_settings
-from .retriever import Hit, Retriever
+from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
 from .audit import log_question
 
@@ -184,7 +184,7 @@ class Answer:
 
 
 def format_hits(hits: list[Hit]) -> str:
-    return "\n\n".join(f"[{h.source}]\n{h.text}" for h in hits)
+    return "\n\n".join(f"[{format_citation(h)}]\n{h.text}" for h in hits)
 
 
 def format_episodic(episodes: list[dict]) -> str:
