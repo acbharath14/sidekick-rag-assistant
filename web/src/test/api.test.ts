@@ -3,7 +3,12 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { summarizeDocument, uploadFile } from "../api";
+import {
+  streamSummarizeDocument,
+  summarizeDocument,
+  uploadFile,
+} from "../api";
+import type { SummarizeEvent } from "../api";
 
 // --- Mock XMLHttpRequest ----------------------------------------------------
 
@@ -173,6 +178,94 @@ describe("summarizeDocument", () => {
       vi.fn().mockResolvedValue({ ok: false, status: 500, statusText: "Boom" }),
     );
     await expect(summarizeDocument("doc1")).rejects.toThrow("500");
+    vi.unstubAllGlobals();
+  });
+});
+
+// --- streamSummarizeDocument ---------------------------------------------------
+
+function mockSseFetch(chunks: string[]) {
+  const bytes = new TextEncoder().encode(chunks.join(""));
+  // Small reads to exercise the client's buffering logic.
+  const parts: Uint8Array[] = [];
+  for (let i = 0; i < bytes.length; i += 13) parts.push(bytes.slice(i, i + 13));
+  let idx = 0;
+  const reader = {
+    read: async (): Promise<{ done: boolean; value?: Uint8Array }> => {
+      if (idx >= parts.length) return { done: true, value: undefined };
+      return { done: false, value: parts[idx++] };
+    },
+  };
+  return vi
+    .fn()
+    .mockResolvedValue({ ok: true, body: { getReader: () => reader } });
+}
+
+describe("streamSummarizeDocument", () => {
+  it("emits start/progress/done events in order", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockSseFetch([
+        `data: {"type":"start","mode":"map_reduce","total":2}\n\n`,
+        `data: {"type":"progress","done":1,"total":2,"stage":"map"}\n\n`,
+        `data: {"type":"progress","done":2,"total":2,"stage":"map"}\n\n`,
+        `data: {"type":"progress","stage":"reduce"}\n\n`,
+        `data: {"type":"done","summary":"Final summary."}\n\n`,
+      ]),
+    );
+    const seen: SummarizeEvent[] = [];
+    await new Promise<void>((resolve, reject) => {
+      streamSummarizeDocument("doc1", {
+        onEvent: (e) => {
+          seen.push(e);
+          if (e.type === "done") resolve();
+        },
+        onError: reject,
+      });
+    });
+    expect(seen.map((e) => e.type)).toEqual([
+      "start",
+      "progress",
+      "progress",
+      "progress",
+      "done",
+    ]);
+    expect(seen[0]).toMatchObject({ mode: "map_reduce", total: 2 });
+    expect(seen[seen.length - 1]).toMatchObject({ summary: "Final summary." });
+    vi.unstubAllGlobals();
+  });
+
+  it("routes error events to onError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockSseFetch([`data: {"type":"error","error":"Document not found."}\n\n`]),
+    );
+    await new Promise<void>((resolve) => {
+      streamSummarizeDocument("nope", {
+        onEvent: () => {},
+        onError: (err) => {
+          expect(err.message).toBe("Document not found.");
+          resolve();
+        },
+      });
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("routes HTTP failures to onError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, statusText: "Boom" }),
+    );
+    await new Promise<void>((resolve) => {
+      streamSummarizeDocument("doc1", {
+        onEvent: () => {},
+        onError: (err) => {
+          expect(err.message).toContain("500");
+          resolve();
+        },
+      });
+    });
     vi.unstubAllGlobals();
   });
 });

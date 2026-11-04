@@ -184,6 +184,73 @@ export async function summarizeDocument(docId: string): Promise<string> {
   return data.summary;
 }
 
+/** Summarize event payloads streamed by POST /api/documents/{id}/summarize/stream. */
+export type SummarizeEvent =
+  | { type: "start"; mode: "single" | "map_reduce"; total: number }
+  | { type: "progress"; done?: number; total?: number; stage: "map" | "reduce" }
+  | { type: "done"; summary: string }
+  | { type: "error"; error: string };
+
+export interface SummarizeStreamCallbacks {
+  onEvent: (event: SummarizeEvent) => void;
+  onError: (err: Error) => void;
+}
+
+/**
+ * Stream summarize progress events via fetch + ReadableStream (same pattern
+ * as streamChat, so the X-API-Key header keeps working). Returns a cancel
+ * function that aborts the stream.
+ */
+export function streamSummarizeDocument(
+  docId: string,
+  cb: SummarizeStreamCallbacks,
+): () => void {
+  const ctrl = new AbortController();
+  let buffer = "";
+
+  const pump = async (): Promise<void> => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/documents/${encodeURIComponent(docId)}/summarize/stream`,
+        {
+          method: "POST",
+          headers: { ...authHeaders() },
+          signal: ctrl.signal,
+        },
+      );
+      if (!res.ok || !res.body) {
+        throw new Error(
+          `POST /api/documents/${docId}/summarize/stream failed: ${res.status} ${res.statusText}`,
+        );
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+        for (const evt of events) {
+          const line = evt.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = JSON.parse(line.slice(5).trim()) as SummarizeEvent;
+          if (payload.type === "error") {
+            throw new Error(payload.error);
+          }
+          cb.onEvent(payload);
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      cb.onError(err as Error);
+    }
+  };
+
+  void pump();
+  return () => ctrl.abort();
+}
+
 export async function deleteDocument(docId: string): Promise<void> {
   const data = await deleteJson<OkResponse>(
     `/api/documents/${encodeURIComponent(docId)}`,

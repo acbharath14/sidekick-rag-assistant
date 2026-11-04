@@ -13,6 +13,10 @@ Robustness, in order of preference:
 Timeouts are deliberately NOT retried: a chunk that burns the full timeout
 once is unlikely to succeed on an immediate retry, and each attempt costs up
 to `timeout` seconds. It goes straight to the raw fallback instead.
+
+Streaming: `summarize_events` yields progress events for SSE consumers
+(start / progress / done / error). `summarize` is a thin wrapper that runs
+the same generator to completion, so both paths share one code path.
 """
 
 from __future__ import annotations
@@ -131,34 +135,63 @@ def _reduce_summaries(partials: list[str], llm, timeout: float | None = None) ->
     return _reduce_summaries(merged, llm, timeout)
 
 
-def summarize(text: str, settings: Settings | None = None) -> str:
-    settings = settings or get_settings()
-    llm = get_llm(settings)
-    if len(text) <= SINGLE_CALL_CHARS:
-        result, _ = _invoke_with_retry(llm, SUMMARY_PROMPT.format(text=text))
-        return result or "Summary didn't complete — the model may be overloaded. Try again."
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_CHARS,
-        chunk_overlap=200,
-    )
-    chunks = splitter.split_text(text)
-    partials = []
-    raw_fallbacks = 0
-    for c in chunks:
-        p, _ = _invoke_with_retry(llm, MAP_PROMPT.format(chunk=c))
-        if p:
-            partials.append(p)
-        else:
-            # Never silently drop content: the reduce step sees the raw
-            # section instead of nothing.
-            partials.append(RAW_SECTION_TEMPLATE.format(chunk=c[:RAW_FALLBACK_CHARS]))
-            raw_fallbacks += 1
-    summary = _reduce_summaries(partials, llm)
-    if not summary:
-        return "Summary didn't complete — the model may be overloaded. Try again."
-    if raw_fallbacks:
-        summary += (
-            f"\n\n_Note: {raw_fallbacks} of {len(chunks)} sections couldn't be "
-            "summarized in time and were included unprocessed._"
+def summarize_events(text: str, settings: Settings | None = None):
+    """Yield progress events for SSE streaming.
+
+    Events (dicts):
+      {"type": "start", "mode": "single" | "map_reduce", "total": n}
+      {"type": "progress", "done": i, "total": n, "stage": "map"}
+      {"type": "progress", "stage": "reduce"}
+      {"type": "done", "summary": "..."}
+      {"type": "error", "error": "..."}
+    """
+    try:
+        settings = settings or get_settings()
+        llm = get_llm(settings)
+        if len(text) <= SINGLE_CALL_CHARS:
+            yield {"type": "start", "mode": "single", "total": 1}
+            result, _ = _invoke_with_retry(llm, SUMMARY_PROMPT.format(text=text))
+            summary = result or "Summary didn't complete — the model may be overloaded. Try again."
+            yield {"type": "done", "summary": summary}
+            return
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_CHARS,
+            chunk_overlap=200,
         )
-    return summary
+        chunks = splitter.split_text(text)
+        yield {"type": "start", "mode": "map_reduce", "total": len(chunks)}
+        partials = []
+        raw_fallbacks = 0
+        for i, c in enumerate(chunks, 1):
+            p, _ = _invoke_with_retry(llm, MAP_PROMPT.format(chunk=c))
+            if p:
+                partials.append(p)
+            else:
+                # Never silently drop content: the reduce step sees the raw
+                # section instead of nothing.
+                partials.append(RAW_SECTION_TEMPLATE.format(chunk=c[:RAW_FALLBACK_CHARS]))
+                raw_fallbacks += 1
+            yield {"type": "progress", "done": i, "total": len(chunks), "stage": "map"}
+        yield {"type": "progress", "stage": "reduce"}
+        summary = _reduce_summaries(partials, llm)
+        if not summary:
+            summary = "Summary didn't complete — the model may be overloaded. Try again."
+        elif raw_fallbacks:
+            summary += (
+                f"\n\n_Note: {raw_fallbacks} of {len(chunks)} sections couldn't be "
+                "summarized in time and were included unprocessed._"
+            )
+        yield {"type": "done", "summary": summary}
+    except Exception as e:
+        yield {"type": "error", "error": f"{type(e).__name__}: {e}"}
+
+
+def summarize(text: str, settings: Settings | None = None) -> str:
+    """Blocking wrapper around summarize_events — one shared code path."""
+    summary: str | None = None
+    for event in summarize_events(text, settings):
+        if event["type"] == "done":
+            summary = event["summary"]
+        elif event["type"] == "error":
+            raise RuntimeError(event["error"])
+    return summary or "Summary didn't complete — the model may be overloaded. Try again."
