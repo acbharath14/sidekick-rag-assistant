@@ -16,6 +16,7 @@ from rag_demo.summarize import (  # noqa: E402
     _invoke_with_retry,
     _reduce_summaries,
     summarize,
+    summarize_events,
 )
 
 
@@ -145,3 +146,57 @@ def test_reduce_single_partial_passthrough():
     fake = FakeLLM([("ok", "only")])
     with patch("time.sleep"):
         assert _reduce_summaries(["single"], fake, timeout=5) == "only"
+
+
+def _collect(text, fake):
+    with patch("rag_demo.summarize.get_llm", return_value=fake):
+        return list(summarize_events(text, settings=object()))
+
+
+def test_events_single_call_sequence():
+    fake = FakeLLM([("ok", "Short summary.")])
+    with patch("time.sleep"):
+        events = _collect("hello world", fake)
+    assert events[0] == {"type": "start", "mode": "single", "total": 1}
+    assert events[-1] == {"type": "done", "summary": "Short summary."}
+    assert len(events) == 2
+
+
+def test_events_map_reduce_sequence():
+    text = "word " * 2000
+    n = _n_chunks(text)
+    assert n > 1
+    fake = FakeLLM([("ok", f"bullets {i}") for i in range(n)] + [("ok", "Final.")])
+    with patch("time.sleep"):
+        events = _collect(text, fake)
+    assert events[0] == {"type": "start", "mode": "map_reduce", "total": n}
+    map_events = [e for e in events if e.get("stage") == "map"]
+    assert [e["done"] for e in map_events] == list(range(1, n + 1))
+    assert {"type": "progress", "stage": "reduce"} in events
+    assert events[-1] == {"type": "done", "summary": "Final."}
+
+
+def test_events_error_when_llm_unavailable():
+    with patch("rag_demo.summarize.get_llm", side_effect=RuntimeError("no model")):
+        events = list(summarize_events("hello", settings=object()))
+    assert len(events) == 1
+    assert events[0]["type"] == "error"
+    assert "no model" in events[0]["error"]
+
+
+def test_summarize_matches_event_stream():
+    text = "word " * 2000
+    n = _n_chunks(text)
+    script = [("ok", f"bullets {i}") for i in range(n)] + [("ok", "Final.")]
+    with patch("time.sleep"):
+        via_events = _collect(text, FakeLLM(list(script)))[-1]["summary"]
+        direct = _summarize_with(FakeLLM(list(script)), text)
+    assert direct == via_events == "Final."
+
+
+def test_summarize_raises_on_error_event():
+    import pytest
+
+    with patch("rag_demo.summarize.get_llm", side_effect=RuntimeError("no model")):
+        with pytest.raises(RuntimeError, match="no model"):
+            summarize("hello", settings=object())

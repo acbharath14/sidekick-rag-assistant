@@ -1,6 +1,7 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { summarizeDocument } from "../api";
+import { streamSummarizeDocument } from "../api";
+import type { SummarizeEvent } from "../api";
 import type { DocumentDetail as DocumentDetailType } from "../types";
 
 interface Props {
@@ -36,22 +37,50 @@ export default function DocumentDetail({
 }: Props) {
   const [summary, setSummary] = useState<string | null>(doc.summary);
   const [summarizing, setSummarizing] = useState(false);
+  const [summarizeProgress, setSummarizeProgress] = useState<string | null>(null);
   const [summarizeError, setSummarizeError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const handleSummarize = async (): Promise<void> => {
+  const handleSummarize = (): void => {
     if (summarizing) return;
     setSummarizing(true);
     setSummarizeError(null);
-    try {
-      const s = await summarizeDocument(doc.id);
-      setSummary(s);
-      onSummaryUpdated(s);
-    } catch (err) {
-      setSummarizeError((err as Error).message);
-    } finally {
+    setSummarizeProgress("Starting…");
+
+    const finish = (): void => {
       setSummarizing(false);
-    }
+      setSummarizeProgress(null);
+    };
+
+    const onEvent = (event: SummarizeEvent): void => {
+      if (event.type === "start") {
+        setSummarizeProgress(
+          event.mode === "single"
+            ? "Summarizing…"
+            : `Summarizing 0/${event.total} sections…`,
+        );
+      } else if (event.type === "progress") {
+        if (event.stage === "reduce") {
+          setSummarizeProgress("Combining section summaries…");
+        } else {
+          setSummarizeProgress(
+            `Summarizing section ${event.done}/${event.total}…`,
+          );
+        }
+      } else if (event.type === "done") {
+        setSummary(event.summary);
+        onSummaryUpdated(event.summary);
+        finish();
+      }
+    };
+
+    streamSummarizeDocument(doc.id, {
+      onEvent,
+      onError: (err) => {
+        setSummarizeError(err.message);
+        finish();
+      },
+    });
   };
 
   const handleDelete = async (): Promise<void> => {
@@ -115,13 +144,13 @@ export default function DocumentDetail({
         <button
           type="button"
           className="upload-card-summarize"
-          onClick={() => void handleSummarize()}
+          onClick={handleSummarize}
           disabled={summarizing}
         >
           {summarizing ? (
             <>
               <span className="summarize-spinner" aria-hidden="true" />
-              {summary ? "Regenerating…" : "Summarizing…"}
+              {summarizeProgress ?? (summary ? "Regenerating…" : "Summarizing…")}
             </>
           ) : summary ? (
             "↻ Regenerate summary"

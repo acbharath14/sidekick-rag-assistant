@@ -423,6 +423,48 @@ def summarize_document(doc_id: str) -> dict:
     return {"ok": True, "summary": summary}
 
 
+@app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_auth)
+def summarize_document_stream(doc_id: str) -> StreamingResponse:
+    """SSE stream of summarize progress events, then a done event.
+
+    Event payloads (see rag_demo.summarize.summarize_events):
+      {"type": "start", "mode": "single" | "map_reduce", "total": n}
+      {"type": "progress", "done": i, "total": n, "stage": "map"}
+      {"type": "progress", "stage": "reduce"}
+      {"type": "done", "summary": "..."}
+      {"type": "error", "error": "..."}
+    The final summary is cached in SQLite exactly like the sync endpoint.
+    """
+
+    def _error_event(message: str):
+        yield f"data: {json.dumps({'type': 'error', 'error': message})}\n\n"
+
+    doc = conv_store.get_document(doc_id)
+    if not doc:
+        return StreamingResponse(_error_event("Document not found."),
+                                 media_type="text/event-stream")
+    text = _upload_texts.get(doc_id)
+    if not text:
+        return StreamingResponse(
+            _error_event("Document text no longer in memory (restarted since upload)."
+                         " Re-upload to summarize."),
+            media_type="text/event-stream",
+        )
+
+    def events():
+        from .summarize import summarize_events
+
+        final: str | None = None
+        for event in summarize_events(text, get_settings()):
+            if event["type"] == "done":
+                final = event["summary"]
+            yield f"data: {json.dumps(event)}\n\n"
+        if final:
+            conv_store.set_document_summary(doc_id, final)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 @app.delete("/api/documents/{doc_id}", dependencies=_auth)
 def delete_document(doc_id: str) -> dict:
     """Remove a document: filter its chunks out of chunks.json, rebuild the
