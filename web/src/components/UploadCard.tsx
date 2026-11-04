@@ -1,30 +1,66 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { summarizeDocument } from "../api";
+import { streamSummarizeDocument } from "../api";
+import type { SummarizeEvent } from "../api";
 import type { UploadResponse } from "../types";
 
 interface Props {
   upload: UploadResponse;
   onDismiss: () => void;
   onViewDocuments: () => void;
+  onChatAbout: (id: string, filename: string) => void;
 }
 
-export default function UploadCard({ upload, onDismiss, onViewDocuments }: Props) {
+export default function UploadCard({
+  upload,
+  onDismiss,
+  onViewDocuments,
+  onChatAbout,
+}: Props) {
   const [summary, setSummary] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
+  const [summarizeProgress, setSummarizeProgress] = useState<string | null>(null);
   const [summarizeError, setSummarizeError] = useState<string | null>(null);
 
-  const handleSummarize = async (): Promise<void> => {
+  const handleSummarize = (): void => {
     if (summarizing) return;
     setSummarizing(true);
     setSummarizeError(null);
-    try {
-      setSummary(await summarizeDocument(upload.id));
-    } catch (err) {
-      setSummarizeError((err as Error).message);
-    } finally {
+    setSummarizeProgress("Starting…");
+
+    const finish = (): void => {
       setSummarizing(false);
-    }
+      setSummarizeProgress(null);
+    };
+
+    const onEvent = (event: SummarizeEvent): void => {
+      if (event.type === "start") {
+        setSummarizeProgress(
+          event.mode === "single"
+            ? "Summarizing…"
+            : `Summarizing 0/${event.total} sections…`,
+        );
+      } else if (event.type === "progress") {
+        if (event.stage === "reduce") {
+          setSummarizeProgress("Combining section summaries…");
+        } else {
+          setSummarizeProgress(
+            `Summarizing section ${event.done}/${event.total}…`,
+          );
+        }
+      } else if (event.type === "done") {
+        setSummary(event.summary);
+        finish();
+      }
+    };
+
+    streamSummarizeDocument(upload.id, {
+      onEvent,
+      onError: (err) => {
+        setSummarizeError(err.message);
+        finish();
+      },
+    });
   };
 
   return (
@@ -71,11 +107,18 @@ export default function UploadCard({ upload, onDismiss, onViewDocuments }: Props
           {summarizing ? (
             <>
               <span className="summarize-spinner" aria-hidden="true" />
-              Summarizing…
+              {summarizeProgress ?? "Summarizing…"}
             </>
           ) : (
             "📝 Summarize"
           )}
+        </button>
+        <button
+          type="button"
+          className="upload-card-chat-about"
+          onClick={() => onChatAbout(upload.id, upload.filename)}
+        >
+          💬 Chat about this document
         </button>
         <button
           type="button"

@@ -578,6 +578,7 @@ export default function App() {
               error={documentsError}
               onSelect={(id) => void handleSelectDocument(id)}
               onDelete={handleDeleteDocument}
+              onChatAbout={(id, name) => void handleChatAboutDocument(id, name)}
               onUpload={(f) => void handleFile(f)}
               uploading={uploadProgress !== null}
               uploadProgress={uploadProgress}
@@ -660,6 +661,7 @@ export default function App() {
               setView("documents");
               void refreshDocuments();
             }}
+            onChatAbout={(id, name) => void handleChatAboutDocument(id, name)}
           />
         )}
         {uploadError && (

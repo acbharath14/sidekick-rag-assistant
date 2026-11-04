@@ -7,6 +7,7 @@ interface Props {
   error: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => Promise<void>;
+  onChatAbout: (id: string, filename: string) => void;
   onUpload: (file: File) => void;
   uploading: boolean;
   uploadProgress: number | null;
@@ -32,6 +33,7 @@ export default function DocumentsView({
   error,
   onSelect,
   onDelete,
+  onChatAbout,
   onUpload,
   uploading,
   uploadProgress,
@@ -128,6 +130,15 @@ export default function DocumentsView({
                   via {d.extractor}
                   {d.has_summary ? " · summarized" : ""}
                 </span>
+              </button>
+              <button
+                type="button"
+                className="doc-card-chat"
+                onClick={() => onChatAbout(d.id, d.filename)}
+                aria-label={`Chat about ${d.filename}`}
+                title="Chat about this document"
+              >
+                💬
               </button>
               <button
                 type="button"
