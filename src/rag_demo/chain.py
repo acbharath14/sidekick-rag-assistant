@@ -413,8 +413,10 @@ def stream_ask(
     head_text = ""
     abstention_detected = False
     HEAD_CHECK_LEN = 200
+    stream_iter = None
     try:
-        for chunk in chain.stream(standalone):
+        stream_iter = chain.stream(standalone)
+        for chunk in stream_iter:
             parts.append(chunk)
             visible = think_filter.feed(chunk)
             if not visible:
@@ -443,6 +445,16 @@ def stream_ask(
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]
+    finally:
+        # Release the model call as soon as the stream ends, errors, or is
+        # abandoned. Abandonment is the disconnect path: the API closes
+        # this generator, GeneratorExit lands at the yield above, and
+        # closing the chain iterator closes the underlying Ollama HTTP
+        # stream instead of letting generation run on for nobody.
+        if stream_iter is not None:
+            close = getattr(stream_iter, "close", None)
+            if close is not None:
+                close()
     text = strip_think("".join(parts))
     text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
