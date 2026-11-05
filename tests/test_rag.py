@@ -427,7 +427,9 @@ def test_stream_ask_close_abandons_chain_stream(monkeypatch, _indexed):
             self.pulls = 0
             self.closed = False
 
-        def stream(self, question):
+        # Main's Langfuse tracing (#55) passes config= to both calls, so
+        # the fake accepts (and ignores) it like the real chain does.
+        def stream(self, question, config=None):
             try:
                 for _ in range(5):
                     self.pulls += 1
@@ -436,7 +438,7 @@ def test_stream_ask_close_abandons_chain_stream(monkeypatch, _indexed):
                 self.closed = True
                 raise
 
-        def invoke(self, question):
+        def invoke(self, question, config=None):
             return "unused"
 
     class FakeRetriever:
