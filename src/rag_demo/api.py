@@ -322,6 +322,29 @@ async def upload(file: UploadFile = File(...)) -> dict:
         return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": f"Couldn't read {file.filename}: {e}"}
+    if not text.strip() and (file.filename or "").lower().endswith(".pdf"):
+        # Scanned PDF with no embedded text — fall back to OCR, mirroring
+        # the old Streamlit app. ocr.py is imported lazily so nothing breaks
+        # when the tesseract/poppler binaries are absent.
+        from .ocr import INSTALL_HINT, ocr_available, ocr_pdf
+
+        if ocr_available():
+            try:
+                text = ocr_pdf(data)
+            except RuntimeError as e:
+                return {
+                    "ok": False,
+                    "error": f"No text found in {file.filename} (scanned PDF). {e}",
+                }
+            if text.strip():
+                extractor = "ocr"
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
+                ),
+            }
     if not text.strip():
         return {"ok": False, "error": f"No text found in {file.filename}."}
 
