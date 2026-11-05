@@ -97,32 +97,37 @@ describe("UploadCard", () => {
     );
   });
 
-  it("calls onChatAbout with the document id and filename", async () => {
-    const user = userEvent.setup();
-    const onChatAbout = vi.fn();
-    render(<UploadCard {...baseProps} onChatAbout={onChatAbout} />);
-    await user.click(
-      screen.getByRole("button", { name: /chat about this document/i }),
-    );
-    expect(onChatAbout).toHaveBeenCalledTimes(1);
-    expect(onChatAbout).toHaveBeenCalledWith("doc1", "report.pdf");
-  });
-
-  it("calls onDismiss when the ✕ button is clicked", async () => {
-    const user = userEvent.setup();
-    const onDismiss = vi.fn();
-    render(<UploadCard {...baseProps} onDismiss={onDismiss} />);
-    await user.click(screen.getByRole("button", { name: /dismiss/i }));
-    expect(onDismiss).toHaveBeenCalledTimes(1);
-  });
-
-  it("calls onViewDocuments when the cabinet button is clicked", async () => {
-    const user = userEvent.setup();
-    const onViewDocuments = vi.fn();
-    render(<UploadCard {...baseProps} onViewDocuments={onViewDocuments} />);
-    await user.click(
-      screen.getByRole("button", { name: /open document cabinet/i }),
-    );
-    expect(onViewDocuments).toHaveBeenCalledTimes(1);
-  });
+  // Click delegation: each button forwards to exactly its own callback.
+  it.each([
+    {
+      name: "onChatAbout",
+      buttonName: /chat about this document/i,
+      propKey: "onChatAbout" as const,
+      expectedArgs: ["doc1", "report.pdf"],
+    },
+    {
+      name: "onDismiss",
+      buttonName: /dismiss/i,
+      propKey: "onDismiss" as const,
+      expectedArgs: [] as string[],
+    },
+    {
+      name: "onViewDocuments",
+      buttonName: /open document cabinet/i,
+      propKey: "onViewDocuments" as const,
+      expectedArgs: [] as string[],
+    },
+  ])(
+    "calls $name when its button is clicked",
+    async ({ buttonName, propKey, expectedArgs }) => {
+      const user = userEvent.setup();
+      const callback = vi.fn();
+      render(<UploadCard {...baseProps} {...{ [propKey]: callback }} />);
+      await user.click(screen.getByRole("button", { name: buttonName }));
+      expect(callback).toHaveBeenCalledTimes(1);
+      if (expectedArgs.length > 0) {
+        expect(callback).toHaveBeenCalledWith(...expectedArgs);
+      }
+    },
+  );
 });
