@@ -347,6 +347,23 @@ model reload on CPU.
 | GET | `/api/config` | Safe settings subset (no secrets) |
 | POST | `/api/feedback` | Thumbs up/down vote |
 
+### Rate limiting
+
+The expensive endpoints are limited per client (one bucket per API key,
+or per client IP when auth is off): chat (`/api/chat`,
+`/api/chat/stream`), upload (`/api/upload`), and summarize
+(`/api/documents/{id}/summarize`, its stream variant, and the legacy
+`/api/upload/{id}/summarize` alias). Defaults per minute: chat 30,
+upload 10, summarize 20. Exceeding a limit returns HTTP 429 with a
+`Retry-After` header (seconds) and a plain JSON error body. Tune with
+`RAG_DEMO_RATE_LIMIT_CHAT_PER_MINUTE`, `RAG_DEMO_RATE_LIMIT_UPLOAD_PER_MINUTE`,
+`RAG_DEMO_RATE_LIMIT_SUMMARIZE_PER_MINUTE` (0 disables that bucket), or
+turn all limiting off with `RAG_DEMO_RATE_LIMIT_ENABLED=0`. Limits are
+in memory per process and reset on restart. `/api/health` is never
+limited, and neither are the cheap read/write endpoints. If the limiter
+itself errors, requests fail open (logged, let through) instead of
+returning 500s. The effective limits are visible at `GET /api/config`.
+
 ### Architecture note
 
 - **Conversations** live in SQLite at `{index_dir}/conversations.db`

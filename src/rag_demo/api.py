@@ -28,6 +28,13 @@ Auth: when the RAG_DEMO_API_KEY env var is set (non-empty), every /api/*
 endpoint except /api/health requires the matching X-API-Key header
 (401 {"detail": "Invalid or missing API key"} otherwise). When the env var
 is unset or empty, all endpoints are open (local dev).
+
+Rate limiting: the expensive endpoints (/api/chat, /api/chat/stream,
+/api/upload, /api/documents/{id}/summarize and its stream and legacy
+alias) are limited per client per minute (see rag_demo.rate_limit and
+Settings.rate_limit_*_per_minute). Exceeding the limit returns 429
+{"detail": "Rate limit exceeded. Try again later."} with a Retry-After
+header (seconds). /api/health is never limited.
 """
 from __future__ import annotations
 
@@ -48,6 +55,7 @@ from .audit import log_feedback
 from .chain import Answer, ask, stream_ask
 from .config import get_embeddings, get_settings
 from . import conversations as conv_store
+from .rate_limit import rate_limit
 
 app = FastAPI(title="Sidekick RAG API")
 
@@ -90,6 +98,16 @@ def require_api_key(
 # Shorthand applied to every protected route below. /api/health is
 # deliberately exempt (Docker healthchecks, frontend health indicator).
 _auth = [Depends(require_api_key)]
+
+# Per-client rate limits (see rate_limit.py). Auth runs first, so a bad
+# key gets 401 without consuming quota, and the limiter keys on the
+# validated key. Chat and its stream share one bucket (both hit the LLM);
+# the two summarize routes share one too. /api/health stays unthrottled,
+# and the cheap endpoints (conversations, feedback, config, document
+# list/get/delete) are not limited.
+_rate_chat = [Depends(require_api_key), Depends(rate_limit("chat"))]
+_rate_upload = [Depends(require_api_key), Depends(rate_limit("upload"))]
+_rate_summarize = [Depends(require_api_key), Depends(rate_limit("summarize"))]
 
 
 def _hit_to_wire(h: Any) -> dict:
@@ -136,7 +154,7 @@ def _document_exists(doc_id: str | None) -> str | None:
     return doc_id if conv_store.get_document(doc_id) else None
 
 
-@app.post("/api/chat", dependencies=_auth)
+@app.post("/api/chat", dependencies=_rate_chat)
 def chat(req: ChatRequest) -> dict:
     conv_id = req.conversation_id
     if conv_id and conv_store.conversation_exists(conv_id):
@@ -166,7 +184,7 @@ def chat(req: ChatRequest) -> dict:
     return body
 
 
-@app.post("/api/chat/stream", dependencies=_auth)
+@app.post("/api/chat/stream", dependencies=_rate_chat)
 def chat_stream(req: ChatRequest) -> StreamingResponse:
     doc_id = _document_exists(req.document_id)
     conv_id = (
@@ -280,6 +298,12 @@ def config() -> dict:
         "retrieval": settings.retrieval,
         "rerank": settings.rerank_enabled,
         "hybrid_fallback": settings.hybrid_fallback,
+        "rate_limit": {
+            "enabled": settings.rate_limit_enabled,
+            "chat_per_minute": settings.rate_limit_chat_per_minute,
+            "upload_per_minute": settings.rate_limit_upload_per_minute,
+            "summarize_per_minute": settings.rate_limit_summarize_per_minute,
+        },
     }
 
 
@@ -291,7 +315,7 @@ def feedback(req: FeedbackRequest) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/upload", dependencies=_auth)
+@app.post("/api/upload", dependencies=_rate_upload)
 async def upload(file: UploadFile = File(...)) -> dict:
     """Upload a document into the PERSISTENT knowledge base.
 
@@ -399,7 +423,7 @@ def get_document(doc_id: str) -> dict:
     return {"ok": True, **doc}
 
 
-@app.post("/api/documents/{doc_id}/summarize", dependencies=_auth)
+@app.post("/api/documents/{doc_id}/summarize", dependencies=_rate_summarize)
 def summarize_document(doc_id: str) -> dict:
     """(Re)generate the LLM summary for a document and cache it in SQLite."""
     doc = conv_store.get_document(doc_id)
@@ -423,7 +447,7 @@ def summarize_document(doc_id: str) -> dict:
     return {"ok": True, "summary": summary}
 
 
-@app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_auth)
+@app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_rate_summarize)
 def summarize_document_stream(doc_id: str) -> StreamingResponse:
     """SSE stream of summarize progress events, then a done event.
 
@@ -510,7 +534,7 @@ def delete_document(doc_id: str) -> dict:
 
 
 # Legacy alias: the React UI's summarize button used /api/upload/{id}/summarize.
-@app.post("/api/upload/{doc_id}/summarize", dependencies=_auth)
+@app.post("/api/upload/{doc_id}/summarize", dependencies=_rate_summarize)
 def summarize_upload(doc_id: str) -> dict:
     return summarize_document(doc_id)
 

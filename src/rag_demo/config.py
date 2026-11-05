@@ -132,6 +132,30 @@ class Settings:
     audit_log_answers: bool = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_AUDIT_LOG_ANSWERS") == "1"
     )
+    # Per-client API rate limits (Phase 1, Wave 3): sliding window of
+    # 60 seconds per API key (or per client IP when auth is off).
+    # Defaults are generous for a single-user demo: chat is the LLM path,
+    # uploads and summarizes are the heavy background paths. A per-bucket
+    # value of 0 disables that bucket; RAG_DEMO_RATE_LIMIT_ENABLED=0
+    # disables all limiting.
+    rate_limit_enabled: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_RATE_LIMIT_ENABLED", "1") == "1"
+    )
+    rate_limit_chat_per_minute: int = field(
+        default_factory=lambda: int(
+            os.environ.get("RAG_DEMO_RATE_LIMIT_CHAT_PER_MINUTE", "30")
+        )
+    )
+    rate_limit_upload_per_minute: int = field(
+        default_factory=lambda: int(
+            os.environ.get("RAG_DEMO_RATE_LIMIT_UPLOAD_PER_MINUTE", "10")
+        )
+    )
+    rate_limit_summarize_per_minute: int = field(
+        default_factory=lambda: int(
+            os.environ.get("RAG_DEMO_RATE_LIMIT_SUMMARIZE_PER_MINUTE", "20")
+        )
+    )
 
     @property
     def fake(self) -> bool:
