@@ -12,7 +12,8 @@ Endpoints:
   GET  /api/health       ollama reachability + index presence
   GET  /api/config       safe settings subset (no secrets)
   POST /api/feedback     thumbs up/down vote (persisted via audit.log_feedback)
-  POST /api/upload       upload a document into the PERSISTENT FAISS index
+  POST /api/upload       upload one or more documents into the PERSISTENT
+                         FAISS index (repeated "file" field)
   GET  /api/documents            list uploaded documents
   GET  /api/documents/{id}       metadata + cached/on-demand summary
   POST /api/documents/{id}/summarize   (re)generate + cache the summary
@@ -45,6 +46,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .audit import log_feedback
+from .caching import clear_cache
 from .chain import Answer, ask, stream_ask
 from .config import get_embeddings, get_settings
 from . import conversations as conv_store
@@ -291,15 +293,23 @@ def feedback(req: FeedbackRequest) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/upload", dependencies=_auth)
-async def upload(file: UploadFile = File(...)) -> dict:
-    """Upload a document into the PERSISTENT knowledge base.
+# Max files accepted in one POST /api/upload request. The per-file size
+# limit (RAG_DEMO_UPLOAD_MAX_MB, default 10 MB) and per-file validation
+# are unchanged; this cap only bounds the batch so one request cannot
+# queue unbounded indexing work. Overridable per process with
+# RAG_DEMO_UPLOAD_MAX_FILES.
+MAX_UPLOAD_FILES = 10
 
-    Extracts text, chunks it, appends the vectors to the on-disk FAISS
-    index (index_dir) and the chunk metadata to chunks.json, and records
-    the document in SQLite. The document is immediately searchable by all
-    subsequent questions — no restart needed. Summarization stays a
-    separate on-demand call.
+
+def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> dict:
+    """Ingest one uploaded file: extract, chunk, index, record.
+
+    Returns the legacy single-file result shape: {"ok": True, **doc} on
+    success, {"ok": False, "error": ...} on failure. The batch endpoint
+    wraps one of these per file; the single-file path returns one
+    untouched, so its response is identical to before. The extract,
+    OCR, and verify imports stay function-local (as they were in the
+    endpoint) so tests can patch rag_demo.extract / rag_demo.ocr.
     """
     import json as _json
 
@@ -308,21 +318,41 @@ async def upload(file: UploadFile = File(...)) -> dict:
 
     from .extract import UnsupportedFormat, extract_text_with_meta, verify_magic_bytes
 
-    settings = get_settings()
-    max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
-    data = await file.read()
     if len(data) > max_mb * 1024 * 1024:
         return {"ok": False, "error": f"File too large (over {max_mb:.0f} MB)."}
     try:
-        if not verify_magic_bytes(file.filename or "upload", data):
+        if not verify_magic_bytes(filename, data):
             return {"ok": False, "error": "File content doesn't match its extension."}
-        text, extractor = extract_text_with_meta(file.filename or "upload", data)
+        text, extractor = extract_text_with_meta(filename, data)
     except UnsupportedFormat as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:
-        return {"ok": False, "error": f"Couldn't read {file.filename}: {e}"}
+        return {"ok": False, "error": f"Couldn't read {filename}: {e}"}
+    if not text.strip() and filename.lower().endswith(".pdf"):
+        # Scanned PDF with no embedded text: fall back to OCR, mirroring
+        # the old Streamlit app. ocr.py is imported lazily so nothing breaks
+        # when the tesseract/poppler binaries are absent.
+        from .ocr import INSTALL_HINT, ocr_available, ocr_pdf
+
+        if ocr_available():
+            try:
+                text = ocr_pdf(data)
+            except RuntimeError as e:
+                return {
+                    "ok": False,
+                    "error": f"No text found in {filename} (scanned PDF). {e}",
+                }
+            if text.strip():
+                extractor = "ocr"
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    f"No text found in {filename} (scanned PDF). {INSTALL_HINT}"
+                ),
+            }
     if not text.strip():
-        return {"ok": False, "error": f"No text found in {file.filename}."}
+        return {"ok": False, "error": f"No text found in {filename}."}
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
@@ -363,7 +393,7 @@ async def upload(file: UploadFile = File(...)) -> dict:
     # Record in SQLite; keep the text in memory for on-demand summarization.
     doc = conv_store.add_document(
         doc_id,
-        file.filename or "upload",
+        filename,
         len(chunks),
         len(text),
         len(data),
@@ -371,6 +401,61 @@ async def upload(file: UploadFile = File(...)) -> dict:
     )
     _upload_texts[doc_id] = text
     return {"ok": True, **doc}
+
+
+@app.post("/api/upload", dependencies=_auth)
+async def upload(file: list[UploadFile] = File(...)) -> dict:
+    """Upload one or more documents into the PERSISTENT knowledge base.
+
+    Accepts a standard multipart request with a repeated "file" field, so
+    one request can carry several documents. Each file goes through the
+    same extraction, chunking, and indexing pipeline as a single-file
+    upload (including the OCR fallback for scanned PDFs with no embedded
+    text). A failure in one file never rolls back the others: every file
+    gets its own result entry.
+
+    Response:
+      - One file: the legacy shape, unchanged: {"ok": True, **doc} on
+        success, {"ok": False, "error": ...} on failure.
+      - Several files: {"ok": <True when every file succeeded>,
+        "results": [{"filename": ..., "ok": True, "id": ..., ...} or
+        {"filename": ..., "ok": False, "error": ...}], "succeeded": n,
+        "failed": m}. Top-level "ok" is False when any file failed, so
+        callers must inspect "results" for the per-file outcome.
+    """
+    settings = get_settings()
+    max_files = int(
+        os.environ.get("RAG_DEMO_UPLOAD_MAX_FILES", str(MAX_UPLOAD_FILES))
+    )
+    if len(file) > max_files:
+        return {
+            "ok": False,
+            "error": f"Too many files (max {max_files} per request).",
+        }
+    max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
+    ingested = []
+    for upload_file in file:
+        filename = upload_file.filename or "upload"
+        data = await upload_file.read()
+        ingested.append((filename, _ingest_upload(filename, data, settings, max_mb)))
+    succeeded = sum(1 for _, result in ingested if result["ok"])
+    if succeeded:
+        # The on-disk index changed, so the cached retriever would keep
+        # serving the old vectors. Drop it once for the whole batch, not
+        # once per file; the next question reloads. (Caching contract,
+        # see caching.py.)
+        clear_cache()
+    if len(ingested) == 1:
+        # Single-file requests keep the exact legacy response shape.
+        return ingested[0][1]
+    return {
+        "ok": succeeded == len(ingested),
+        "results": [
+            {"filename": name, **result} for name, result in ingested
+        ],
+        "succeeded": succeeded,
+        "failed": len(ingested) - succeeded,
+    }
 
 
 @app.get("/api/documents", dependencies=_auth)

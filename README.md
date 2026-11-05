@@ -341,7 +341,7 @@ model reload on CPU.
 | GET | `/api/documents` | List uploaded documents |
 | GET | `/api/documents/{id}` | Document detail + summary |
 | DELETE | `/api/documents/{id}` | Remove a document from the index |
-| POST | `/api/upload` | Upload a file (extract + index; fast) |
+| POST | `/api/upload` | Upload one or more files (extract + index; fast) |
 | POST | `/api/upload/{id}/summarize` | Summarize an uploaded document (slow, on demand) |
 | GET | `/api/health` | Ollama reachability + index presence |
 | GET | `/api/config` | Safe settings subset (no secrets) |
