@@ -8,6 +8,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
+from . import tracing
+from .audit import log_question
 from .config import Settings, get_llm, get_settings
 from .ollama_guard import (
     OllamaTimeoutError,
@@ -17,7 +19,6 @@ from .ollama_guard import (
 )
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
-from .audit import log_question
 
 SYSTEM = """You answer questions using ONLY the context below.
 For greetings or remarks that aren't questions (e.g. "hi", "thanks", "that's
@@ -162,7 +163,10 @@ def small_talk_answer(question: str, llm, settings: Settings | None = None) -> s
         "Respond briefly and warmly (1-2 sentences). You are Sidekick, "
         "a helpful RAG assistant. Do not mention sources or citations."
     )
-    return strip_think(invoke_llm(llm, prompt, settings, label="small-talk").strip())
+    # Tracing span wraps the guarded call: the span records the call
+    # timing while the guard owns the invoke (timeout plus retry).
+    with tracing.span("small-talk"):
+        return strip_think(invoke_llm(llm, prompt, settings, label="small-talk").strip())
 
 
 def general_knowledge_answer(question: str, llm, settings: Settings | None = None) -> str:
@@ -171,20 +175,24 @@ def general_knowledge_answer(question: str, llm, settings: Settings | None = Non
         "Answer the following question from your general knowledge. "
         "Be concise and accurate.\n\nQuestion: " + question
     )
-    text = strip_think(invoke_llm(llm, prompt, settings, label="general-knowledge"))
+    # Tracing span wraps the guarded call (see small_talk_answer).
+    with tracing.span("general-knowledge"):
+        text = strip_think(invoke_llm(llm, prompt, settings, label="general-knowledge"))
     return "🌐 General knowledge (not from your corpus).\n" + text.strip()
 
 
-def _invoke_chain(chain, standalone: str, settings: Settings) -> str:
+def _invoke_chain(chain, standalone: str, settings: Settings, config=None) -> str:
     """One generation call with the shared timeout and retry policy.
 
     The whole chain (retrieve plus LLM) runs in a worker thread with the
     model deadline; transient Ollama errors are retried with backoff and
     timeouts fail fast as OllamaTimeoutError, never retried. Retrying
     re-runs the local retrieval too, which is cheap (local FAISS/BM25).
+    config carries the Langfuse run config (None when tracing is off);
+    LangChain runnables accept config=None.
     """
     return call_with_timeout_and_retry(
-        lambda: chain.invoke(standalone),
+        lambda: chain.invoke(standalone, config=config),
         timeout=settings.llm_timeout_seconds,
         attempts=settings.llm_retry_attempts,
         backoff=settings.llm_retry_backoff_seconds,
@@ -250,11 +258,12 @@ def build_chain(
             ),
         ]
     )
+    # Named so the step shows as "retrieve" in a Langfuse trace.
     retrieve = RunnableLambda(
         lambda q: retriever.search(
             q, user_groups=groups, source_filter=source_filter
         )
-    )
+    ).with_config({"run_name": "retrieve"})
 
     def _format_context(hits: list[Hit]) -> str:
         parts = []
@@ -265,7 +274,10 @@ def build_chain(
 
     chain = (
         {
-            "context": retrieve | RunnableLambda(_format_context),
+            "context": retrieve
+            | RunnableLambda(_format_context).with_config(
+                {"run_name": "format-context"}
+            ),
             "question": RunnablePassthrough(),
         }
         | prompt
@@ -287,7 +299,33 @@ def ask(
     user_groups: asker's groups for permission-aware retrieval (defaults to
     settings.user_groups). retriever: inject a pre-built retriever (e.g.
     an in-memory upload index). document_id: scope retrieval to a single
-    uploaded document's chunks."""
+    uploaded document's chunks.
+
+    Opens one Langfuse trace per question (a no-op when tracing is off).
+    """
+    settings = settings or get_settings()
+    metadata = {"model": settings.ollama_model}
+    if document_id:
+        metadata["document_id"] = document_id
+    with tracing.question_span(question, metadata=metadata):
+        return _ask_impl(
+            question,
+            settings=settings,
+            history=history,
+            user_groups=user_groups,
+            retriever=retriever,
+            document_id=document_id,
+        )
+
+
+def _ask_impl(
+    question: str,
+    settings: Settings | None = None,
+    history: list[tuple[str, str]] | None = None,
+    user_groups: list[str] | None = None,
+    retriever: Retriever | None = None,
+    document_id: str | None = None,
+) -> Answer:
     import time
 
     settings = settings or get_settings()
@@ -334,16 +372,22 @@ def ask(
         episodic_context=episodic_context,
         document_id=document_id,
     )
-    text = _invoke_chain(chain, standalone, settings)
+    text = _invoke_chain(
+        chain, standalone, settings, config=tracing.run_config(run_name="generate")
+    )
     text = strip_think(text)
     # Server-side hybrid fallback: if the model abstained but hybrid is on,
     # answer from general knowledge instead of showing "No relevant answer".
     if settings.hybrid_fallback and is_abstention(text):
         text = general_knowledge_answer(standalone, llm, settings)
     latency_ms = (time.perf_counter() - started) * 1000
-    hits = retriever.search(
-        standalone, user_groups=groups, source_filter=source_filter
-    )
+    # Retrieval runs a second time here, after generation, to collect the
+    # citations for the answer. Traced as its own span so the duplication
+    # is visible in the trace.
+    with tracing.span("retrieve-hits"):
+        hits = retriever.search(
+            standalone, user_groups=groups, source_filter=source_filter
+        )
     sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
@@ -376,7 +420,35 @@ def stream_ask(
     document_id: str | None = None,
 ):
     """Streaming variant of ask(). Yields {"token": str} chunks as the LLM
-    generates, then a final {"answer": Answer}. Powers st.write_stream."""
+    generates, then a final {"answer": Answer}. Powers st.write_stream.
+
+    Opens one Langfuse trace per question (a no-op when tracing is off).
+    The trace stays open until the stream is exhausted or the client
+    disconnects.
+    """
+    settings = settings or get_settings()
+    metadata = {"model": settings.ollama_model}
+    if document_id:
+        metadata["document_id"] = document_id
+    with tracing.question_span(question, metadata=metadata):
+        yield from _stream_ask_impl(
+            question,
+            settings=settings,
+            history=history,
+            user_groups=user_groups,
+            retriever=retriever,
+            document_id=document_id,
+        )
+
+
+def _stream_ask_impl(
+    question: str,
+    settings: Settings | None = None,
+    history: list[tuple[str, str]] | None = None,
+    user_groups: list[str] | None = None,
+    retriever: Retriever | None = None,
+    document_id: str | None = None,
+):
     import time
 
     settings = settings or get_settings()
@@ -434,7 +506,7 @@ def stream_ask(
     HEAD_CHECK_LEN = 200
     try:
         for chunk in iter_with_idle_timeout(
-            chain.stream(standalone),
+            chain.stream(standalone, config=tracing.run_config(run_name="generate")),
             settings.stream_idle_timeout_seconds,
             label="chat-stream",
         ):
@@ -466,7 +538,9 @@ def stream_ask(
         raise
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
-        text = _invoke_chain(chain, standalone, settings)
+        text = _invoke_chain(
+            chain, standalone, settings, config=tracing.run_config(run_name="generate")
+        )
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]
@@ -490,9 +564,13 @@ def stream_ask(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
-    hits = retriever.search(
-        standalone, user_groups=groups, source_filter=source_filter
-    )
+    # Retrieval runs a second time here, after generation, to collect the
+    # citations for the answer. Traced as its own span so the duplication
+    # is visible in the trace.
+    with tracing.span("retrieve-hits"):
+        hits = retriever.search(
+            standalone, user_groups=groups, source_filter=source_filter
+        )
     answer = Answer(
         text=text,
         sources=sorted({h.source for h in hits}),

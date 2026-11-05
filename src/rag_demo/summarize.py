@@ -32,6 +32,7 @@ import time
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from . import tracing
 from .config import Settings, get_llm, get_settings
 from .ollama_guard import TRACKER, track_call
 
@@ -69,12 +70,16 @@ RAW_SECTION_TEMPLATE = (
 )
 
 
-def _invoke_once(llm, prompt: str, timeout: float | None = None) -> tuple[str, str, BaseException | None]:
+def _invoke_once(
+    llm, prompt: str, timeout: float | None = None, run_name: str | None = None
+) -> tuple[str, str, BaseException | None]:
     """Single LLM attempt.
 
     Returns (text, status, exc) where status is "ok", "timeout", or
     "error" and exc is the failure when status is "error". The call is
     recorded in the shared Ollama tracker, like every other LLM call.
+    run_name names the Langfuse run when tracing is on (e.g.
+    "summarize-single"); None leaves the call untraced.
     """
     import concurrent.futures
     import os
@@ -85,7 +90,10 @@ def _invoke_once(llm, prompt: str, timeout: float | None = None) -> tuple[str, s
         timeout = float(os.environ.get("RAG_DEMO_SUMMARY_TIMEOUT", "600"))
 
     def _do():
-        out = llm.invoke(prompt)
+        # Runs in a worker thread, so its Langfuse run shows as its own
+        # trace instead of nesting under the question trace. The timing
+        # is still there.
+        out = tracing.invoke_llm(llm, prompt, run_name=run_name)
         text = out.content if hasattr(out, "content") else str(out)
         return strip_think(text.strip())
 
@@ -110,9 +118,9 @@ def _invoke_once(llm, prompt: str, timeout: float | None = None) -> tuple[str, s
         ex.shutdown(wait=False, cancel_futures=True)
 
 
-def _invoke(llm, prompt: str, timeout: float | None = None) -> str:
+def _invoke(llm, prompt: str, timeout: float | None = None, run_name: str | None = None) -> str:
     """Invoke the LLM with a timeout; returns '' on timeout/failure."""
-    text, _, _ = _invoke_once(llm, prompt, timeout)
+    text, _, _ = _invoke_once(llm, prompt, timeout, run_name=run_name)
     return text
 
 
@@ -122,6 +130,7 @@ def _invoke_with_retry(
     timeout: float | None = None,
     attempts: int = RETRY_ATTEMPTS,
     backoff: tuple[float, ...] = RETRY_BACKOFF_SECONDS,
+    run_name: str | None = None,
 ) -> tuple[str, str]:
     """Invoke with retries for transient errors.
 
@@ -129,7 +138,7 @@ def _invoke_with_retry(
     (see module docstring for why). Each retry is logged. Returns
     (text, status).
     """
-    text, status, exc = _invoke_once(llm, prompt, timeout)
+    text, status, exc = _invoke_once(llm, prompt, timeout, run_name=run_name)
     attempt = 1
     for wait in backoff[: max(0, attempts - 1)]:
         if status != "error":
@@ -142,7 +151,7 @@ def _invoke_with_retry(
             )
         attempt += 1
         time.sleep(wait)
-        text, status, exc = _invoke_once(llm, prompt, timeout)
+        text, status, exc = _invoke_once(llm, prompt, timeout, run_name=run_name)
     return text, status
 
 
@@ -158,7 +167,12 @@ def _reduce_summaries(
     combined = "\n\n".join(partials)
     if len(combined) <= REDUCE_LIMIT_CHARS or len(partials) <= 1:
         result, _ = _invoke_with_retry(
-            llm, REDUCE_PROMPT.format(summaries=combined), timeout, attempts, backoff
+            llm,
+            REDUCE_PROMPT.format(summaries=combined),
+            timeout,
+            attempts,
+            backoff,
+            run_name="summarize-reduce",
         )
         return result
     mid = len(partials) // 2
@@ -191,6 +205,7 @@ def summarize_events(text: str, settings: Settings | None = None):
                 settings.summarize_timeout_seconds,
                 settings.llm_retry_attempts,
                 settings.llm_retry_backoff_seconds,
+                run_name="summarize-single",
             )
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
             yield {"type": "done", "summary": summary}
@@ -210,6 +225,7 @@ def summarize_events(text: str, settings: Settings | None = None):
                 settings.summarize_timeout_seconds,
                 settings.llm_retry_attempts,
                 settings.llm_retry_backoff_seconds,
+                run_name="summarize-map",
             )
             if p:
                 partials.append(p)
