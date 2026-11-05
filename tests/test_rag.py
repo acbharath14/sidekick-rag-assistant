@@ -737,6 +737,72 @@ def test_cached_retriever_constructed_once_across_two_questions(
     assert calls[0] == 1, "embeddings must be constructed once across questions"
 
 
+def test_ask_reuses_cached_retriever_by_default(_indexed, monkeypatch):
+    """(b): ask() with no explicit retriever uses the cached retriever,
+    so a second question pays no second embeddings construction."""
+    from rag_demo.caching import clear_cache
+    from rag_demo.chain import ask
+
+    calls = _counting_embeddings(monkeypatch)
+    clear_cache()
+
+    ans1 = ask("What is the max parcel weight?", _indexed)
+    ans2 = ask("How long are API tokens valid?", _indexed)
+    assert ans1.text and ans2.text
+    assert ans1.sources and ans2.sources
+    assert calls[0] == 1, "second question must reuse the loaded index"
+
+
+def _counting_search(monkeypatch):
+    """Patch Retriever.search with a counting wrapper.
+
+    Returns a dict with the call count and the hits of the latest call.
+    """
+    from rag_demo.retriever import Retriever
+
+    calls = {"n": 0, "hits": []}
+    orig = Retriever.search
+
+    def counting(self, query, *args, **kwargs):
+        calls["n"] += 1
+        result = orig(self, query, *args, **kwargs)
+        calls["hits"] = result
+        return result
+
+    monkeypatch.setattr(Retriever, "search", counting)
+    return calls
+
+
+def test_ask_retrieves_once_per_question(_indexed, monkeypatch):
+    """(c): one retrieval per question. The citations reuse the hits
+    generation already retrieved instead of searching again."""
+    from rag_demo.caching import clear_cache
+    from rag_demo.chain import ask
+
+    calls = _counting_search(monkeypatch)
+    clear_cache()
+
+    answer = ask("What is the max parcel weight?", _indexed)
+    assert calls["n"] == 1, "expected exactly one retrieval per question"
+    assert answer.hits == calls["hits"]
+    assert answer.sources == sorted({h.source for h in calls["hits"]})
+
+
+def test_stream_ask_retrieves_once_per_question(_indexed, monkeypatch):
+    """(c), streaming variant: same single-retrieval guarantee."""
+    from rag_demo.caching import clear_cache
+    from rag_demo.chain import stream_ask
+
+    calls = _counting_search(monkeypatch)
+    clear_cache()
+
+    events = list(stream_ask("What is the max parcel weight?", _indexed))
+    answers = [e["answer"] for e in events if "answer" in e]
+    assert len(answers) == 1
+    assert calls["n"] == 1, "expected exactly one retrieval per question"
+    assert answers[0].hits == calls["hits"]
+
+
 def test_cached_retriever_same_settings_returns_same_object(
     _indexed, monkeypatch
 ):

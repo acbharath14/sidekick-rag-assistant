@@ -17,6 +17,9 @@ Design (deliberate, read before changing):
   there is no standalone store-load path in the app (ingest creates
   stores; the upload path creates its own in-memory store), so caching
   the Retriever covers every load.
+- The FastAPI path reaches this cache through chain.build_chain (the
+  default retriever) and chain.ask/stream_ask (episodic memory), so
+  the API, CLI and Streamlit app share one app-lifetime retriever.
 
 Cache-invalidation contract (Phase 4 Settings depends on this):
 - Entries are keyed by exactly the settings that affect the object:
@@ -34,9 +37,9 @@ Cache-invalidation contract (Phase 4 Settings depends on this):
 - Keying does NOT cover rebuilding an index in place (same index_dir,
   new vectors): the cached Retriever would keep serving the old store.
   Any code path that rebuilds an index MUST call clear_cache()
-  afterwards. Today that is the enterprise index build in app.py; the
-  Phase 4 Settings panel must do the same on model/corpus/index change
-  and after any rebuild.
+  afterwards. Today that is the enterprise index build in app.py and
+  the upload/delete endpoints in api.py; the Phase 4 Settings panel
+  must do the same on model/corpus/index change and after any rebuild.
 - Upload retrievers are never cached: they are session-specific
   in-memory indexes passed explicitly, and must never leak across
   sessions via this process-global cache.

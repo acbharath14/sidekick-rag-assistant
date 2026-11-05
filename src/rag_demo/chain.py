@@ -12,6 +12,7 @@ from .config import Settings, get_llm, get_settings
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
 from .audit import log_question
+from .caching import get_cached_episodic_memory, get_cached_retriever
 
 SYSTEM = """You answer questions using ONLY the context below.
 For greetings or remarks that aren't questions (e.g. "hi", "thanks", "that's
@@ -207,15 +208,45 @@ def format_episodic(episodes: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _generation_hits(
+    capture: dict,
+    retriever: Retriever,
+    standalone: str,
+    groups: list[str] | None,
+    source_filter: str | None,
+) -> list[Hit]:
+    """Hits for the answer: the ones generation already retrieved.
+
+    The chain retrieves once to build the prompt; those hits are the
+    citations. Only if generation somehow ran without retrieving (a
+    future chain variant, an error path) do we run one search here.
+    Same query, groups and filter as generation, so the result is
+    identical to the old second search.
+    """
+    hits = capture.get("hits")
+    if hits is None:
+        hits = retriever.search(
+            standalone, user_groups=groups, source_filter=source_filter
+        )
+    return hits
+
+
 def build_chain(
     settings: Settings | None = None,
     retriever: Retriever | None = None,
     user_groups: list[str] | None = None,
     episodic_context: str = "",
     document_id: str | None = None,
+    capture: dict | None = None,
 ):
     settings = settings or get_settings()
-    retriever = retriever or Retriever(settings)
+    # Default path reuses the app-lifetime cached retriever (one FAISS
+    # load, one BM25 build, one shared embeddings object, one lazy
+    # reranker) instead of rebuilding per question. An explicitly passed
+    # retriever (e.g. an in-memory upload index) still wins and is never
+    # cached. Loading stays lazy: nothing is built at import time, the
+    # first question pays the load. See caching.py.
+    retriever = retriever or get_cached_retriever(settings)
     # Resolve groups once: the SAME filtered hits feed the prompt AND the
     # returned answer. Never let the LLM see what the user may not.
     groups = user_groups if user_groups is not None else settings.user_groups
@@ -231,11 +262,19 @@ def build_chain(
             ),
         ]
     )
-    retrieve = RunnableLambda(
-        lambda q: retriever.search(
+    def _retrieve(q: str) -> list[Hit]:
+        hits = retriever.search(
             q, user_groups=groups, source_filter=source_filter
         )
-    )
+        # Record the generation-time hits so the caller can reuse them
+        # for citations instead of running retrieval a second time.
+        # `capture` is per-question state owned by the caller, never
+        # shared across requests.
+        if capture is not None:
+            capture["hits"] = hits
+        return hits
+
+    retrieve = RunnableLambda(_retrieve)
 
     def _format_context(hits: list[Hit]) -> str:
         parts = []
@@ -267,7 +306,8 @@ def ask(
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
     settings.user_groups). retriever: inject a pre-built retriever (e.g.
-    an in-memory upload index). document_id: scope retrieval to a single
+    an in-memory upload index); when omitted, the shared cached retriever
+    is used (see caching.py). document_id: scope retrieval to a single
     uploaded document's chunks."""
     import time
 
@@ -290,12 +330,12 @@ def ask(
     # context for the answer. It is deliberately NOT merged into `history`:
     # history feeds query rewriting, and prior-session Q&As are not the
     # current conversation — letting them drive the rewrite lets stale
-    # context override the user's actual question.
+    # context override the user's actual question. The cached instance is
+    # shared with the save below, so episodic memory is built once per
+    # question, not twice.
     episodic_context = ""
     try:
-        from .episodic import EpisodicMemory
-
-        _episodic = EpisodicMemory(settings)
+        _episodic = get_cached_episodic_memory(settings)
         _episodes = _episodic.search(question, k=3)
         if _episodes:
             episodic_context = format_episodic(_episodes)
@@ -308,12 +348,16 @@ def ask(
     )
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
+    # `capture` collects the hits generation retrieves, so the answer
+    # reuses them for citations instead of searching a second time.
+    capture: dict = {}
     chain, retriever, groups = build_chain(
         settings,
         retriever=retriever,
         user_groups=user_groups,
         episodic_context=episodic_context,
         document_id=document_id,
+        capture=capture,
     )
     text = chain.invoke(standalone)
     text = strip_think(text)
@@ -322,9 +366,7 @@ def ask(
     if settings.hybrid_fallback and is_abstention(text):
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
-    hits = retriever.search(
-        standalone, user_groups=groups, source_filter=source_filter
-    )
+    hits = _generation_hits(capture, retriever, standalone, groups, source_filter)
     sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
@@ -337,12 +379,11 @@ def ask(
     )
     log_question(settings, question, answer, latency_ms)
     # Save to episodic memory for long-term recall (skip if it was a fallback
-    # to avoid polluting memory with "I don't know" responses).
+    # to avoid polluting memory with "I don't know" responses). Same
+    # cached instance as the search above.
     if answer.grounded:
         try:
-            from .episodic import EpisodicMemory
-
-            EpisodicMemory(settings).add(question, text)
+            get_cached_episodic_memory(settings).add(question, text)
         except Exception:
             pass
     return answer
@@ -380,11 +421,10 @@ def stream_ask(
         return
     # Episodic memory: supplementary context only — never merged into
     # history, so it can't hijack the query rewrite (see ask()).
+    # Cached instance, shared with the save below: built once.
     episodic_context = ""
     try:
-        from .episodic import EpisodicMemory
-
-        _episodic = EpisodicMemory(settings)
+        _episodic = get_cached_episodic_memory(settings)
         _episodes = _episodic.search(question, k=3)
         if _episodes:
             episodic_context = format_episodic(_episodes)
@@ -397,12 +437,16 @@ def stream_ask(
     )
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
+    # `capture` collects the hits generation retrieves, so the answer
+    # reuses them for citations instead of searching a second time.
+    capture: dict = {}
     chain, retriever, groups = build_chain(
         settings,
         retriever=retriever,
         user_groups=user_groups,
         episodic_context=episodic_context,
         document_id=document_id,
+        capture=capture,
     )
     parts: list[str] = []
     think_filter = ThinkBlockFilter()
@@ -463,9 +507,7 @@ def stream_ask(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
-    hits = retriever.search(
-        standalone, user_groups=groups, source_filter=source_filter
-    )
+    hits = _generation_hits(capture, retriever, standalone, groups, source_filter)
     answer = Answer(
         text=text,
         sources=sorted({h.source for h in hits}),
@@ -476,12 +518,11 @@ def stream_ask(
         weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
-    # Save to episodic memory (skip ungrounded fallbacks).
+    # Save to episodic memory (skip ungrounded fallbacks). Same cached
+    # instance as the search above.
     if answer.grounded:
         try:
-            from .episodic import EpisodicMemory
-
-            EpisodicMemory(settings).add(question, text)
+            get_cached_episodic_memory(settings).add(question, text)
         except Exception:
             pass
     yield {"answer": answer}
