@@ -29,6 +29,20 @@ else
     echo "OK: OLLAMA_KEEP_ALIVE=$KEEP_ALIVE"
 fi
 
+echo "Checking Langfuse tracing (optional) ..."
+if [ -n "${LANGFUSE_PUBLIC_KEY:-}" ] && [ -n "${LANGFUSE_SECRET_KEY:-}" ]; then
+    LANGFUSE_URL="${LANGFUSE_BASE_URL:-${LANGFUSE_HOST:-http://127.0.0.1:3000}}"
+    if curl -sfL "$LANGFUSE_URL/" > /dev/null 2>&1; then
+        echo "OK: Langfuse reachable at $LANGFUSE_URL (tracing on)."
+    else
+        echo "WARN: Langfuse keys are set but the server is not reachable at $LANGFUSE_URL."
+        echo "  Tracing stays off until it is up; the app still works."
+        echo "  Start it with: docker compose -f docker-compose.langfuse.yml up -d"
+    fi
+else
+    echo "SKIP: Langfuse tracing is off (LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set)."
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
