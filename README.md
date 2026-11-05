@@ -345,7 +345,12 @@ model reload on CPU.
 | POST | `/api/upload/{id}/summarize` | Summarize an uploaded document (slow, on demand) |
 | GET | `/api/health` | Ollama reachability + index presence |
 | GET | `/api/config` | Safe settings subset (no secrets) |
+| GET | `/api/metrics` | In-memory counters + latency summaries (no new dependency) |
 | POST | `/api/feedback` | Thumbs up/down vote |
+
+### Observability
+
+Every question, upload, summarize, and error writes one JSON log line to stdout (the uvicorn log), so latency and health are visible with no external service. A question line carries a request id, endpoint, model, per-step timings in milliseconds (rewrite, retrieve, generate, total; rerank time stays inside retrieve), hit count, source names, and whether the retriever was rebuilt. Question text is logged truncated to the first 120 characters with common secret shapes redacted; answer text and document text are never logged. `GET /api/metrics` returns the same counters as JSON: questions served (streamed split out), uploads and summarizes with error counts, Ollama errors and timeouts, per-step latency (count, mean, p95 over the last 1000 samples), and cache hits/reloads when the caching module reports them. Counts reset on restart. Set `RAG_DEMO_LOG_LEVEL` to change log verbosity (default INFO).
 
 ### Architecture note
 

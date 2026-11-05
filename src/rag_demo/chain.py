@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from langchain_core.output_parsers import StrOutputParser
@@ -9,6 +10,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from .config import Settings, get_llm, get_settings
+from .observability import (
+    log_error_event,
+    log_question_event,
+    new_request_id,
+    record_cache_reload,
+    record_llm_error,
+    record_question,
+)
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
 from .audit import log_question
@@ -207,15 +216,33 @@ def format_episodic(episodes: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _model_name(settings: Settings) -> str:
+    """Display model for logs (same rule as audit.log_question)."""
+    return (
+        settings.ollama_model
+        if settings.llm_provider == "ollama"
+        else settings.llm_provider
+    )
+
+
 def build_chain(
     settings: Settings | None = None,
     retriever: Retriever | None = None,
     user_groups: list[str] | None = None,
     episodic_context: str = "",
     document_id: str | None = None,
+    timings: dict | None = None,
 ):
     settings = settings or get_settings()
-    retriever = retriever or Retriever(settings)
+    if retriever is None:
+        # Default path builds a fresh Retriever (index load) per
+        # question, so it counts as a cache reload. When the Wave 1
+        # caching PR lands, this branch becomes get_cached_retriever(...)
+        # and the record call moves to a hit-or-miss check around it
+        # (see the PR body merge note). An explicitly passed retriever
+        # is neither a hit nor a reload and is not counted.
+        record_cache_reload()
+        retriever = Retriever(settings)
     # Resolve groups once: the SAME filtered hits feed the prompt AND the
     # returned answer. Never let the LLM see what the user may not.
     groups = user_groups if user_groups is not None else settings.user_groups
@@ -231,11 +258,23 @@ def build_chain(
             ),
         ]
     )
-    retrieve = RunnableLambda(
-        lambda q: retriever.search(
-            q, user_groups=groups, source_filter=source_filter
-        )
-    )
+    def _retrieve(q: str) -> list[Hit]:
+        # Time the retrieval inside the chain so ask()/stream_ask()
+        # can report retrieve_ms separately from generate_ms. Rerank
+        # time stays inside retrieve_ms (see observability.py).
+        _t0 = time.perf_counter()
+        try:
+            return retriever.search(
+                q, user_groups=groups, source_filter=source_filter
+            )
+        finally:
+            if timings is not None:
+                timings["retrieve_ms"] = (
+                    timings.get("retrieve_ms") or 0.0
+                ) + (time.perf_counter() - _t0) * 1000
+                timings["retrieve_calls"] = timings.get("retrieve_calls", 0) + 1
+
+    retrieve = RunnableLambda(_retrieve)
 
     def _format_context(hits: list[Hit]) -> str:
         parts = []
@@ -263,21 +302,62 @@ def ask(
     user_groups: list[str] | None = None,
     retriever: Retriever | None = None,
     document_id: str | None = None,
+    request_id: str | None = None,
+    endpoint: str | None = None,
 ) -> Answer:
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
     settings.user_groups). retriever: inject a pre-built retriever (e.g.
     an in-memory upload index). document_id: scope retrieval to a single
-    uploaded document's chunks."""
-    import time
-
+    uploaded document's chunks. request_id/endpoint: carried into the
+    structured log line (api.py supplies them; direct callers get a
+    generated id and endpoint "direct")."""
     settings = settings or get_settings()
     history = history or []
+    request_id = request_id or new_request_id()
+    model = _model_name(settings)
     llm = get_llm(settings)
     # Small talk bypasses retrieval entirely — no need to search the corpus
     # for "hi".
     if is_small_talk(question):
-        text = small_talk_answer(question, llm)
+        _t0 = time.perf_counter()
+        try:
+            text = small_talk_answer(question, llm)
+        except Exception as e:
+            record_llm_error(e)
+            log_error_event(
+                request_id=request_id,
+                endpoint=endpoint,
+                where="generate",
+                error_type=type(e).__name__,
+                error=str(e),
+                model=model,
+            )
+            raise
+        _ms = (time.perf_counter() - _t0) * 1000
+        timings: dict = {
+            "rewrite_ms": None,
+            "episodic_ms": None,
+            "retrieve_ms": None,
+            "retrieve_calls": 0,
+            "generate_ms": _ms,
+            "total_ms": _ms,
+        }
+        record_question(timings, streamed=False)
+        log_question_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            model=model,
+            question=question,
+            timings=timings,
+            hits=0,
+            sources=[],
+            grounded=True,
+            weak_evidence=False,
+            standalone=False,
+            streamed=False,
+            cache_reload=False,
+        )
         return Answer(
             text=text,
             sources=[],
@@ -291,7 +371,16 @@ def ask(
     # history feeds query rewriting, and prior-session Q&As are not the
     # current conversation — letting them drive the rewrite lets stale
     # context override the user's actual question.
+    timings = {
+        "rewrite_ms": None,
+        "episodic_ms": None,
+        "retrieve_ms": None,
+        "retrieve_calls": 0,
+        "generate_ms": None,
+        "total_ms": None,
+    }
     episodic_context = ""
+    _t0 = time.perf_counter()
     try:
         from .episodic import EpisodicMemory
 
@@ -301,27 +390,58 @@ def ask(
             episodic_context = format_episodic(_episodes)
     except Exception:
         pass
+    finally:
+        timings["episodic_ms"] = (time.perf_counter() - _t0) * 1000
+    _t0 = time.perf_counter()
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
         else question
     )
+    if settings.rewrite_enabled and history:
+        timings["rewrite_ms"] = (time.perf_counter() - _t0) * 1000
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
+    # Whether this question built a fresh retriever (cache reload) or
+    # was handed one (explicit retriever: neither hit nor reload).
+    # Read before build_chain rebinds the name.
+    cache_reload = retriever is None
     chain, retriever, groups = build_chain(
         settings,
         retriever=retriever,
         user_groups=user_groups,
         episodic_context=episodic_context,
         document_id=document_id,
+        timings=timings,
     )
-    text = chain.invoke(standalone)
-    text = strip_think(text)
-    # Server-side hybrid fallback: if the model abstained but hybrid is on,
-    # answer from general knowledge instead of showing "No relevant answer".
-    if settings.hybrid_fallback and is_abstention(text):
-        text = general_knowledge_answer(standalone, llm)
+    try:
+        text = chain.invoke(standalone)
+        text = strip_think(text)
+        # Server-side hybrid fallback: if the model abstained but hybrid is on,
+        # answer from general knowledge instead of showing "No relevant answer".
+        if settings.hybrid_fallback and is_abstention(text):
+            text = general_knowledge_answer(standalone, llm)
+    except Exception as e:
+        # No behavior change: the error still propagates to the caller
+        # (the API returns 500 as before). It is only counted and logged.
+        record_llm_error(e)
+        log_error_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            where="generate",
+            error_type=type(e).__name__,
+            error=str(e),
+            model=model,
+        )
+        raise
     latency_ms = (time.perf_counter() - started) * 1000
+    # generate_ms is chain time minus retrieval, so it includes prompt
+    # formatting and retriever construction: an approximation, not a
+    # pure LLM timer (see observability.log_question_event).
+    timings["generate_ms"] = max(
+        latency_ms - (timings.get("retrieve_ms") or 0.0), 0.0
+    )
+    timings["total_ms"] = latency_ms
     hits = retriever.search(
         standalone, user_groups=groups, source_filter=source_filter
     )
@@ -336,6 +456,21 @@ def ask(
         weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
+    record_question(timings, streamed=False)
+    log_question_event(
+        request_id=request_id,
+        endpoint=endpoint,
+        model=model,
+        question=question,
+        timings=timings,
+        hits=len(hits),
+        sources=sources,
+        grounded=answer.grounded,
+        weak_evidence=answer.weak_evidence,
+        standalone=answer.standalone_question is not None,
+        streamed=False,
+        cache_reload=cache_reload,
+    )
     # Save to episodic memory for long-term recall (skip if it was a fallback
     # to avoid polluting memory with "I don't know" responses).
     if answer.grounded:
@@ -355,17 +490,57 @@ def stream_ask(
     user_groups: list[str] | None = None,
     retriever: Retriever | None = None,
     document_id: str | None = None,
+    request_id: str | None = None,
+    endpoint: str | None = None,
 ):
     """Streaming variant of ask(). Yields {"token": str} chunks as the LLM
-    generates, then a final {"answer": Answer}. Powers st.write_stream."""
-    import time
-
+    generates, then a final {"answer": Answer}. Powers st.write_stream.
+    request_id/endpoint are carried into the structured log line (see ask)."""
     settings = settings or get_settings()
     history = history or []
+    request_id = request_id or new_request_id()
+    model = _model_name(settings)
     llm = get_llm(settings)
     # Small talk bypasses retrieval entirely.
     if is_small_talk(question):
-        text = small_talk_answer(question, llm)
+        _t0 = time.perf_counter()
+        try:
+            text = small_talk_answer(question, llm)
+        except Exception as e:
+            record_llm_error(e)
+            log_error_event(
+                request_id=request_id,
+                endpoint=endpoint,
+                where="generate",
+                error_type=type(e).__name__,
+                error=str(e),
+                model=model,
+            )
+            raise
+        _ms = (time.perf_counter() - _t0) * 1000
+        timings: dict = {
+            "rewrite_ms": None,
+            "episodic_ms": None,
+            "retrieve_ms": None,
+            "retrieve_calls": 0,
+            "generate_ms": _ms,
+            "total_ms": _ms,
+        }
+        record_question(timings, streamed=True)
+        log_question_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            model=model,
+            question=question,
+            timings=timings,
+            hits=0,
+            sources=[],
+            grounded=True,
+            weak_evidence=False,
+            standalone=False,
+            streamed=True,
+            cache_reload=False,
+        )
         yield {"token": text}
         yield {
             "answer": Answer(
@@ -380,7 +555,16 @@ def stream_ask(
         return
     # Episodic memory: supplementary context only — never merged into
     # history, so it can't hijack the query rewrite (see ask()).
+    timings = {
+        "rewrite_ms": None,
+        "episodic_ms": None,
+        "retrieve_ms": None,
+        "retrieve_calls": 0,
+        "generate_ms": None,
+        "total_ms": None,
+    }
     episodic_context = ""
+    _t0 = time.perf_counter()
     try:
         from .episodic import EpisodicMemory
 
@@ -390,19 +574,26 @@ def stream_ask(
             episodic_context = format_episodic(_episodes)
     except Exception:
         pass
+    finally:
+        timings["episodic_ms"] = (time.perf_counter() - _t0) * 1000
+    _t0 = time.perf_counter()
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
         else question
     )
+    if settings.rewrite_enabled and history:
+        timings["rewrite_ms"] = (time.perf_counter() - _t0) * 1000
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
+    cache_reload = retriever is None
     chain, retriever, groups = build_chain(
         settings,
         retriever=retriever,
         user_groups=user_groups,
         episodic_context=episodic_context,
         document_id=document_id,
+        timings=timings,
     )
     parts: list[str] = []
     think_filter = ThinkBlockFilter()
@@ -437,9 +628,32 @@ def stream_ask(
                         head_buf = []
             else:
                 yield {"token": visible}
-    except Exception:
+    except Exception as e:
         # Streaming not supported by this LLM — fall back to one shot.
-        text = chain.invoke(standalone)
+        # Counted once here; if the one-shot retry also fails, it is
+        # counted again and the error propagates (same as before).
+        record_llm_error(e)
+        log_error_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            where="stream",
+            error_type=type(e).__name__,
+            error=str(e),
+            model=model,
+        )
+        try:
+            text = chain.invoke(standalone)
+        except Exception as e2:
+            record_llm_error(e2)
+            log_error_event(
+                request_id=request_id,
+                endpoint=endpoint,
+                where="generate",
+                error_type=type(e2).__name__,
+                error=str(e2),
+                model=model,
+            )
+            raise
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]
@@ -463,6 +677,10 @@ def stream_ask(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
+    timings["generate_ms"] = max(
+        latency_ms - (timings.get("retrieve_ms") or 0.0), 0.0
+    )
+    timings["total_ms"] = latency_ms
     hits = retriever.search(
         standalone, user_groups=groups, source_filter=source_filter
     )
@@ -476,6 +694,21 @@ def stream_ask(
         weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
+    record_question(timings, streamed=True)
+    log_question_event(
+        request_id=request_id,
+        endpoint=endpoint,
+        model=model,
+        question=question,
+        timings=timings,
+        hits=len(hits),
+        sources=answer.sources,
+        grounded=answer.grounded,
+        weak_evidence=answer.weak_evidence,
+        standalone=answer.standalone_question is not None,
+        streamed=True,
+        cache_reload=cache_reload,
+    )
     # Save to episodic memory (skip ungrounded fallbacks).
     if answer.grounded:
         try:
