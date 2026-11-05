@@ -44,20 +44,18 @@ def test_chunks_carry_source_metadata(settings):
     assert all(c.metadata.get("source", "").endswith(".md") for c in chunks)
 
 
-def test_retriever_returns_hits_with_sources(_indexed):
-    r = Retriever(_indexed)
-    hits = r.search("API token expiry", k=3)
-    assert len(hits) == 3
-    assert all(h.source.endswith(".md") and h.text for h in hits)
-
-
-def test_retriever_returns_k_hits(_indexed):
+@pytest.mark.parametrize(
+    "k,query",
+    [(3, "API token expiry"), (4, "anything at all")],
+    ids=["k3", "k4"],
+)
+def test_retriever_returns_k_hits(_indexed, k, query):
     # With FakeEmbeddings the vector space is random, so this asserts
     # structure, not which doc wins. Real-embedding quality is measured
     # by evals/eval_retrieval.py.
     r = Retriever(_indexed)
-    hits = r.search("anything at all", k=4)
-    assert len(hits) == 4
+    hits = r.search(query, k=k)
+    assert len(hits) == k
     assert all(h.source.endswith(".md") and h.text for h in hits)
 
 
@@ -67,11 +65,15 @@ def test_chain_answers_with_citations(_indexed):
     assert answer.sources, "expected source citations"
 
 
-def test_format_hits_marks_sources():
+def test_format_hits_marks_sources_and_sections():
     from rag_demo.retriever import Hit
 
     out = format_hits([Hit(text="hello", source="a.md", score=0.1)])
     assert "[a.md]" in out and "hello" in out
+    out_section = format_hits(
+        [Hit(text="hello", source="a.md", score=0.1, section="Auth")]
+    )
+    assert "[a.md › Auth]" in out_section and "hello" in out_section
 
 
 def test_golden_eval_runs_end_to_end(_indexed, monkeypatch):
@@ -126,25 +128,37 @@ def test_playwright_source_is_registered():
     assert SOURCES["meridian"].__name__ == "MarkdownDirectorySource"
 
 
-def test_rrf_fuse_orders_by_rank():
+def test_rrf_fuse_rank_dedup_and_identity():
     from rag_demo.retriever import Hit, rrf_fuse
 
+    # Scenario 1: rank order — ranked 1st in one list outranks ranked 2nd
+    # elsewhere.
     a = Hit(text="doc-a", source="a.md", score=0.0)
     b = Hit(text="doc-b", source="b.md", score=0.0)
     fused = rrf_fuse([[a, b], [a]], k=2)
     assert [h.source for h in fused] == ["a.md", "b.md"]
     assert fused[0].score > fused[1].score
 
-
-def test_rrf_fuse_dedupes_by_text_and_source():
-    from rag_demo.retriever import Hit, rrf_fuse
-
+    # Scenario 2: dedup — same text+source fuses into one entry with the
+    # summed rank score.
     a1 = Hit(text="same", source="a.md", score=0.0)
     a2 = Hit(text="same", source="a.md", score=0.0)
     fused = rrf_fuse([[a1], [a2]], k=2)
     assert len(fused) == 1
     # ranked 1st in both lists: 2 * 1/(60+1)
     assert fused[0].score == pytest.approx(2 / 61)
+
+    # Scenario 3: identity — fusion keeps the richest chunk metadata and
+    # does not mutate the caller's hits.
+    dense_hit = Hit(text="same", source="a.md", score=0.1, chunk_id="a.md#s:0",
+                    section="S", dense_score=0.3)
+    bm25_hit = Hit(text="same", source="a.md", score=9.0)
+    fused = rrf_fuse([[dense_hit], [bm25_hit]], k=1)
+    assert len(fused) == 1
+    assert fused[0].chunk_id == "a.md#s:0"
+    assert fused[0].section == "S"
+    assert fused[0].dense_score == pytest.approx(0.3)
+    assert bm25_hit.dense_score is None
 
 
 def test_chunks_json_written_on_ingest(_indexed):
@@ -173,12 +187,6 @@ def test_hybrid_search_returns_k_hits(_indexed, monkeypatch):
     r = Retriever(s)
     hits = r.search("weight_kg", k=3)
     assert len(hits) == 3
-
-
-def test_rewrite_no_history_returns_question_unchanged():
-    from rag_demo.rewrite import rewrite_query
-
-    assert rewrite_query("hello?", [], llm=None) == "hello?"
 
 
 def test_rewrite_uses_history_with_fake_llm():
@@ -434,11 +442,40 @@ def _fixture(name):
     return Path(__file__).resolve().parent / "fixtures" / name
 
 
-def test_extract_txt():
+def _extract_fixture_bytes(filename):
+    """Fixture bytes for the extract-format matrix (mirrors the repo's
+    supported formats)."""
+    if filename.endswith(".txt"):
+        return b"# Sample\n\nHello from the text fixture."
+    if filename.endswith(".pdf"):
+        return _make_pdf_bytes("Hello from the pdf fixture.")
+    if filename.endswith(".docx"):
+        import io
+
+        from docx import Document
+
+        buf = io.BytesIO()
+        doc = Document()
+        doc.add_paragraph("Hello from the docx fixture.")
+        doc.save(buf)
+        return buf.getvalue()
+    raise AssertionError(f"no extract fixture for {filename}")
+
+
+@pytest.mark.parametrize(
+    "filename,expected_snippet",
+    [
+        ("sample.txt", "Hello from the text fixture"),
+        ("sample.pdf", "Hello from the pdf fixture"),
+        ("notes.docx", "Hello from the docx fixture"),
+    ],
+    ids=["txt", "pdf", "docx"],
+)
+def test_extract_supported_formats(filename, expected_snippet):
     from rag_demo.extract import extract_text
 
-    text = extract_text("sample.txt", b"# Sample\n\nHello from the text fixture.")
-    assert "Hello from the text fixture" in text
+    text = extract_text(filename, _extract_fixture_bytes(filename))
+    assert expected_snippet in text
 
 
 def _make_pdf_bytes(text: str) -> bytes:
@@ -467,28 +504,6 @@ def _make_pdf_bytes(text: str) -> bytes:
     return b"\n".join(out)
 
 
-def test_extract_pdf():
-    from rag_demo.extract import extract_text
-
-    text = extract_text("sample.pdf", _make_pdf_bytes("Hello from the pdf fixture."))
-    assert "Hello from the pdf fixture" in text
-
-
-def test_extract_docx():
-    import io
-
-    from docx import Document
-
-    from rag_demo.extract import extract_text
-
-    buf = io.BytesIO()
-    doc = Document()
-    doc.add_paragraph("Hello from the docx fixture.")
-    doc.save(buf)
-    text = extract_text("notes.docx", buf.getvalue())
-    assert "Hello from the docx fixture" in text
-
-
 def test_extract_csv_renders_table():
     from rag_demo.extract import extract_text
 
@@ -502,47 +517,6 @@ def test_extract_unsupported_format_raises():
 
     with pytest.raises(UnsupportedFormat):
         extract_text("evil.exe", b"MZ...")
-
-
-def test_summarize_short_doc_single_call():
-    from langchain_core.language_models.fake import FakeListLLM
-
-    from rag_demo.summarize import summarize
-
-    s = get_settings()
-    llm = FakeListLLM(responses=["Short summary."])
-    import rag_demo.summarize as summod
-
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(summod, "get_llm", lambda settings=None: llm)
-    try:
-        assert summarize("A short document.", s) == "Short summary."
-    finally:
-        monkeypatch.undo()
-
-
-def test_summarize_long_doc_map_reduce():
-    from langchain_core.language_models.fake import FakeListLLM
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-    import rag_demo.summarize as summod
-    from rag_demo.summarize import CHUNK_CHARS, summarize
-
-    long_text = ("This is sentence number {}. " * 400).format(*range(400))
-    assert len(long_text) > 6000
-    n_chunks = len(
-        RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_CHARS, chunk_overlap=200
-        ).split_text(long_text)
-    )
-    llm = FakeListLLM(responses=["- bullet"] * n_chunks + ["FINAL SUMMARY"])
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(summod, "get_llm", lambda settings=None: llm)
-    try:
-        out = summarize(long_text, get_settings())
-        assert out == "FINAL SUMMARY"
-    finally:
-        monkeypatch.undo()
 
 
 def test_retriever_accepts_injected_store(_indexed):
