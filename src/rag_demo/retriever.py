@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
+from . import tracing
 from .config import INDEX_FORMAT_VERSION, Settings, get_embeddings, get_settings
 
 try:
@@ -332,7 +333,9 @@ class Retriever:
             # Rank the whole pool, then floor, then trim — rerank() takes
             # top_k, so pass the pool size to keep every candidate.
             # Skipped on empty pools so no model is loaded for nothing.
-            hits = self._maybe_rerank(query, hits, len(hits))
+            # Traced so the rerank cost is visible in the question trace.
+            with tracing.span("rerank", metadata={"candidates": len(hits)}):
+                hits = self._maybe_rerank(query, hits, len(hits))
             score_kind = "rerank"
         pre_floor = len(hits)
         hits, dropped = apply_floor(hits, self.settings.relevance_floor, score_kind)
