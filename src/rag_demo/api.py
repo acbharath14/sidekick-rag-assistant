@@ -9,7 +9,9 @@ Endpoints:
   POST /api/chat         non-streaming ask (optional document_id to scope
                          retrieval, optional conversation_id for persistence)
   POST /api/chat/stream  SSE streaming (token events, then done)
-  GET  /api/health       ollama reachability + index presence
+  GET  /api/health       ollama reachability + index presence +
+                         Ollama queue snapshot (in-flight calls, waits,
+                         timeouts, retries)
   GET  /api/config       safe settings subset (no secrets)
   POST /api/feedback     thumbs up/down vote (persisted via audit.log_feedback)
   POST /api/upload       upload a document into the PERSISTENT FAISS index
@@ -47,6 +49,13 @@ from pydantic import BaseModel
 from .audit import log_feedback
 from .chain import Answer, ask, stream_ask
 from .config import get_embeddings, get_settings
+from .ollama_guard import (
+    OllamaTimeoutError,
+    is_transient_error,
+    iter_with_idle_timeout,
+    ollama_snapshot,
+    run_with_timeout,
+)
 from . import conversations as conv_store
 
 app = FastAPI(title="Sidekick RAG API")
@@ -145,11 +154,33 @@ def chat(req: ChatRequest) -> dict:
     else:
         conv_id = None
         new_title = None
-    answer = ask(
-        req.question,
-        history=req.history or [],
-        document_id=_document_exists(req.document_id),
-    )
+    # Request deadline (settings.chat_timeout_seconds, 330s by default):
+    # a hung Ollama call fails fast with 504 instead of hanging the
+    # request. Transient Ollama errors surface as 502 once the bounded
+    # retries inside the chain are exhausted.
+    settings = get_settings()
+    try:
+        answer = run_with_timeout(
+            lambda: ask(
+                req.question,
+                history=req.history or [],
+                document_id=_document_exists(req.document_id),
+            ),
+            settings.chat_timeout_seconds,
+            label="chat",
+        )
+    except OllamaTimeoutError:
+        raise HTTPException(
+            status_code=http_status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="The model took too long to answer. Try again in a moment.",
+        )
+    except Exception as e:
+        if is_transient_error(e):
+            raise HTTPException(
+                status_code=http_status.HTTP_502_BAD_GATEWAY,
+                detail="Ollama is unreachable right now. Try again in a moment.",
+            )
+        raise
     if conv_id:
         conv_store.add_message(
             conv_id,
@@ -182,17 +213,48 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
 
     def events():
         final_answer: Answer | None = None
-        for event in stream_ask(
-            req.question, history=req.history or [], document_id=doc_id
-        ):
-            if "token" in event:
-                yield f"data: {json.dumps({'token': event['token']})}\n\n"
-            else:
-                final_answer = event["answer"]
-                payload = {"done": _answer_to_wire(final_answer)}
-                if new_title:
-                    payload["done"]["conversation_title"] = new_title
-                yield f"data: {json.dumps(payload)}\n\n"
+        try:
+            for event in stream_ask(
+                req.question, history=req.history or [], document_id=doc_id
+            ):
+                if "token" in event:
+                    yield f"data: {json.dumps({'token': event['token']})}\n\n"
+                else:
+                    final_answer = event["answer"]
+                    payload = {"done": _answer_to_wire(final_answer)}
+                    if new_title:
+                        payload["done"]["conversation_title"] = new_title
+                    yield f"data: {json.dumps(payload)}\n\n"
+        except OllamaTimeoutError:
+            # Stalled stream: end with a plain error event instead of
+            # leaving the SSE connection open forever.
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "error": "The model took too long to respond. "
+                        "Try again in a moment.",
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        except Exception as e:
+            if is_transient_error(e):
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "error",
+                            "error": "Ollama is unreachable right now. "
+                            "Try again in a moment.",
+                        }
+                    )
+                    + "\n\n"
+                )
+                return
+            raise
         if conv_id and final_answer is not None:
             conv_store.add_message(
                 conv_id,
@@ -268,6 +330,9 @@ def health() -> dict:
         "status": "ok" if ollama_ok else "degraded",
         "ollama_reachable": ollama_ok,
         "index_present": index_dir.exists(),
+        # Queue visibility: in-flight calls, waits, timeouts, retries.
+        # A backed-up Ollama shows up here without opening the logs.
+        "ollama": ollama_snapshot(),
     }
 
 
@@ -414,8 +479,18 @@ def summarize_document(doc_id: str) -> dict:
         }
     from .summarize import summarize
 
+    settings = get_settings()
     try:
-        summary = summarize(text, get_settings())
+        summary = run_with_timeout(
+            lambda: summarize(text, settings),
+            settings.summarize_request_timeout_seconds,
+            label="summarize",
+        )
+    except OllamaTimeoutError:
+        return {
+            "ok": False,
+            "error": "Summarization timed out. Try again with a shorter document.",
+        }
     except Exception as e:
         return {"ok": False, "error": f"Summarize failed: {type(e).__name__}: {e}"}
     summary = summary or "Summary returned empty."
@@ -454,11 +529,30 @@ def summarize_document_stream(doc_id: str) -> StreamingResponse:
     def events():
         from .summarize import summarize_events
 
+        settings = get_settings()
         final: str | None = None
-        for event in summarize_events(text, get_settings()):
-            if event["type"] == "done":
-                final = event["summary"]
-            yield f"data: {json.dumps(event)}\n\n"
+        try:
+            for event in iter_with_idle_timeout(
+                summarize_events(text, settings),
+                settings.stream_idle_timeout_seconds,
+                label="summarize-stream",
+            ):
+                if event["type"] == "done":
+                    final = event["summary"]
+                yield f"data: {json.dumps(event)}\n\n"
+        except OllamaTimeoutError:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "error": "Summarization stalled: the model produced "
+                        "no output for a while. Try again in a moment.",
+                    }
+                )
+                + "\n\n"
+            )
+            return
         if final:
             conv_store.set_document_summary(doc_id, final)
 

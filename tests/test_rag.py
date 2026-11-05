@@ -1015,3 +1015,203 @@ def test_phase3_default_pipeline(monkeypatch):
     monkeypatch.setenv("RAG_DEMO_RERANK", "1")
     s = Settings()
     assert s.rerank_enabled is True
+
+
+# --- Phase 1 (S2): backend timeouts, Ollama retry, queue visibility ---
+
+
+class _Reply:
+    """Minimal stand-in for an LLM reply (only .content is read)."""
+
+    def __init__(self, text):
+        self.content = text
+
+
+class _FlakyLLM:
+    """Fails `failures` times with `error`, then answers "ok"."""
+
+    def __init__(self, failures, error):
+        self.failures = failures
+        self.error = error
+        self.calls = 0
+
+    def invoke(self, prompt):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return _Reply("ok")
+
+
+class _SlowLLM:
+    """Never answers within a test timeout: sleeps 0.5s per call."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, prompt):
+        import time
+
+        self.calls += 1
+        time.sleep(0.5)
+        return _Reply("too late")
+
+
+def _fast_timeout_settings():
+    """Settings with instant retries and short deadlines, for tests."""
+    from rag_demo.config import Settings
+
+    return Settings(
+        llm_timeout_seconds=0.05,
+        llm_retry_attempts=3,
+        llm_retry_backoff_seconds=(0.0, 0.0),
+    )
+
+
+def test_ollama_transient_error_retried_then_succeeds():
+    from rag_demo.ollama_guard import (
+        invoke_llm,
+        ollama_snapshot,
+        reset_ollama_tracker,
+    )
+
+    llm = _FlakyLLM(2, ConnectionError("connection refused"))
+    reset_ollama_tracker()
+    assert invoke_llm(llm, "hi", _fast_timeout_settings(), label="test") == "ok"
+    assert llm.calls == 3
+    assert ollama_snapshot()["retries_total"] == 2
+
+
+def test_ollama_http_5xx_is_retried():
+    from rag_demo.ollama_guard import invoke_llm
+
+    llm = _FlakyLLM(
+        1, RuntimeError("Ollama returned HTTP 503 Service Unavailable")
+    )
+    assert invoke_llm(llm, "hi", _fast_timeout_settings(), label="test") == "ok"
+    assert llm.calls == 2
+
+
+def test_ollama_http_4xx_is_not_retried():
+    from rag_demo.ollama_guard import invoke_llm
+
+    llm = _FlakyLLM(5, RuntimeError("Ollama returned HTTP 400 Bad Request"))
+    with pytest.raises(RuntimeError, match="400"):
+        invoke_llm(llm, "hi", _fast_timeout_settings(), label="test")
+    assert llm.calls == 1
+
+
+def test_ollama_timeout_is_not_retried():
+    from rag_demo.ollama_guard import OllamaTimeoutError, invoke_llm
+
+    llm = _SlowLLM()
+    with pytest.raises(OllamaTimeoutError, match="timed out"):
+        invoke_llm(llm, "hi", _fast_timeout_settings(), label="test")
+    assert llm.calls == 1, "a timeout must never be retried"
+
+
+def test_ollama_tracker_reports_queue_state():
+    from rag_demo.ollama_guard import (
+        ollama_snapshot,
+        reset_ollama_tracker,
+        track_call,
+    )
+
+    reset_ollama_tracker()
+    with track_call("outer"):
+        assert ollama_snapshot()["in_flight"] == 1
+        with track_call("inner"):
+            snap = ollama_snapshot()
+            assert snap["in_flight"] == 2
+            assert snap["queued_behind_total"] == 1
+    snap = ollama_snapshot()
+    assert snap["in_flight"] == 0
+    assert snap["calls_total"] == 2
+    assert snap["max_in_flight"] == 2
+
+
+def test_summarize_does_not_retry_timeout():
+    """Summarize policy, shared everywhere now: timeouts go straight to
+    the raw fallback instead of burning another full timeout on retry."""
+    from rag_demo.summarize import _invoke_with_retry
+
+    llm = _SlowLLM()
+    text, status = _invoke_with_retry(
+        llm, "summarize this", timeout=0.05, attempts=3, backoff=(0.0, 0.0)
+    )
+    assert text == "" and status == "timeout"
+    assert llm.calls == 1
+
+
+def test_stream_idle_timeout_raises():
+    import time
+
+    from rag_demo.ollama_guard import OllamaTimeoutError, iter_with_idle_timeout
+
+    def slow_stream():
+        yield "first"
+        time.sleep(0.5)
+        yield "second"
+
+    with pytest.raises(OllamaTimeoutError, match="stalled"):
+        list(iter_with_idle_timeout(slow_stream(), 0.05, label="test-stream"))
+
+
+def test_timeout_settings_defaults(monkeypatch):
+    from rag_demo.config import Settings
+
+    for var in (
+        "RAG_DEMO_LLM_TIMEOUT",
+        "RAG_DEMO_LLM_RETRY_ATTEMPTS",
+        "RAG_DEMO_LLM_RETRY_BACKOFF",
+        "RAG_DEMO_CHAT_TIMEOUT",
+        "RAG_DEMO_STREAM_IDLE_TIMEOUT",
+        "RAG_DEMO_SUMMARY_TIMEOUT",
+        "RAG_DEMO_SUMMARY_REQUEST_TIMEOUT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    s = Settings()
+    assert s.llm_timeout_seconds == 300.0
+    assert s.llm_retry_attempts == 3
+    assert s.llm_retry_backoff_seconds == (5.0, 15.0)
+    assert s.chat_timeout_seconds == 330.0
+    assert s.stream_idle_timeout_seconds == 300.0
+    assert s.summarize_timeout_seconds == 600.0
+    assert s.summarize_request_timeout_seconds == 0.0
+
+    monkeypatch.setenv("RAG_DEMO_LLM_TIMEOUT", "60")
+    monkeypatch.setenv("RAG_DEMO_CHAT_TIMEOUT", "90")
+    s = Settings()
+    assert s.llm_timeout_seconds == 60.0
+    assert s.chat_timeout_seconds == 90.0
+
+
+def test_ask_fails_fast_on_hung_llm(_indexed, monkeypatch):
+    """A hung model fails the question in ~0.05s, not after 300s."""
+    import dataclasses
+    import time
+
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+    from rag_demo.chain import ask
+    from rag_demo.ollama_guard import OllamaTimeoutError
+
+    calls = []
+
+    def _slow(prompt):
+        calls.append(1)
+        time.sleep(0.5)
+        return "too late"
+
+    monkeypatch.setattr(
+        chain_mod, "get_llm", lambda settings=None: RunnableLambda(_slow)
+    )
+    settings = dataclasses.replace(
+        _indexed,
+        llm_timeout_seconds=0.05,
+        llm_retry_attempts=1,
+        llm_retry_backoff_seconds=(0.0,),
+    )
+    with pytest.raises(OllamaTimeoutError):
+        ask("What is the max parcel weight?", settings)
+    assert len(calls) == 1
