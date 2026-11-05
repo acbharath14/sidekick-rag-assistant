@@ -105,70 +105,137 @@ def test_playwright_sources_are_doc_filenames():
 
 # --- score_prompt ------------------------------------------------------------
 
-def test_score_retrieval_hit_miss_and_na():
-    hits = [_hit("api-reference.md")]
-    assert ps.score_prompt(_prompt(expected_sources=["api-reference.md"]), hits)["retrieval"] is True
-    assert ps.score_prompt(_prompt(expected_sources=["other.md"]), hits)["retrieval"] is False
-    assert ps.score_prompt(_prompt(), hits)["retrieval"] is None
+# --- score_prompt: table-driven scoring matrix -------------------------------
+
+_FULL_SECTION = (
+    "Meridian Logistics — Shipment Tracking API Reference > Track a shipment"
+)
 
 
-def test_score_absent_sources():
-    hits = [_hit("confluence:OPS/TMS deploy checklist")]
-    p = _prompt(expect_absent_sources=["confluence:OPS/Driver pay bands FY27"])
-    assert ps.score_prompt(p, hits)["retrieval_absent"] is True
-    hits2 = [_hit("confluence:OPS/Driver pay bands FY27")]
-    assert ps.score_prompt(p, hits2)["retrieval_absent"] is False
-    assert ps.score_prompt(_prompt(), hits)["retrieval_absent"] is None
+def _scoring_cases():
+    """(case_id, prompt_overrides, hits, score_kwargs, field, expected).
 
-
-def test_score_precision_section_substring_and_source_only():
-    full = "Meridian Logistics — Shipment Tracking API Reference > Track a shipment"
-    p = _prompt(expected_sources=["api-reference.md"],
-                expected_sections=["Meridian Logistics — Shipment Tracking API Reference > Track a shipment"])
-    assert ps.score_prompt(p, [_hit("api-reference.md", section=full)])["precision"] is True
-    # H2-only expectation still matches the full path (substring rule).
-    p2 = _prompt(expected_sources=["api-reference.md"],
-                 expected_sections=["Track a shipment"])
-    assert ps.score_prompt(p2, [_hit("api-reference.md", section=full)])["precision"] is True
-    assert ps.score_prompt(p2, [_hit("api-reference.md", section="Other")])["precision"] is False
-    # No sections => source-level only (confluence-mock pages).
-    p3 = _prompt(expected_sources=["confluence:OPS/TMS deploy checklist"])
-    assert ps.score_prompt(p3, [_hit("confluence:OPS/TMS deploy checklist")])["precision"] is True
-    assert ps.score_prompt(p3, [_hit("confluence:OPS/EDI retry policy")])["precision"] is False
-
-
-def test_score_rerank_improved_worse_absent_and_na():
-    p = _prompt(expected_sources=["b.md"])
+    Every scoring rule stays a row — consolidation, not deletion.
+    """
+    p_rank = {"expected_sources": ["b.md"]}
     before = [_hit("a.md"), _hit("b.md"), _hit("c.md")]
     after = [_hit("b.md"), _hit("a.md")]
-    assert ps.score_prompt(p, after, before)["rerank"] == {"before": 2, "after": 1, "improved": True}
-    assert ps.score_prompt(p, before, after)["rerank"]["improved"] is False
-    assert ps.score_prompt(p, [_hit("a.md")], [_hit("a.md")])["rerank"]["before"] is None
-    assert ps.score_prompt(p, after, None)["rerank"] is None
-
-
-def test_score_accuracy_keywords_and_any():
-    p = _prompt(expect_keywords=["90 days", "token_expired"])
-    assert ps.score_prompt(p, [], answer_text="Tokens last 90 days; 401 token_expired")["accuracy"] is True
-    assert ps.score_prompt(p, [], answer_text="Tokens last 90 days")["accuracy"] is False
-    assert ps.score_prompt(p, [], answer_text=None)["accuracy"] is None
-    assert ps.score_prompt(_prompt(), [], answer_text="anything")["accuracy"] is None
-    p2 = _prompt(expect_keywords_any=["getByRole", "get_by_role"])
-    assert ps.score_prompt(p2, [], answer_text="use getByRole")["accuracy"] is True
-    assert ps.score_prompt(p2, [], answer_text="use locator")["accuracy"] is False
-
-
-def test_aggregation_counts_applicable_only():
-    rows = [
-        {"retrieval": True, "precision": True, "accuracy": None,
-         "rerank": {"before": 2, "after": 1, "improved": True}},
-        {"retrieval": False, "precision": False, "accuracy": None,
-         "rerank": {"before": None, "after": 1, "improved": None}},
-        {"retrieval": None, "precision": None, "accuracy": None, "rerank": None},
+    return [
+        # retrieval: hit / miss / no expectations
+        ("retrieval-hit",
+         {"expected_sources": ["api-reference.md"]},
+         [_hit("api-reference.md")], {}, "retrieval", True),
+        ("retrieval-miss",
+         {"expected_sources": ["other.md"]},
+         [_hit("api-reference.md")], {}, "retrieval", False),
+        ("retrieval-na",
+         {}, [_hit("api-reference.md")], {}, "retrieval", None),
+        # retrieval_absent: forbidden source absent / present / no expectations
+        ("absent-ok",
+         {"expect_absent_sources": ["confluence:OPS/Driver pay bands FY27"]},
+         [_hit("confluence:OPS/TMS deploy checklist")],
+         {}, "retrieval_absent", True),
+        ("absent-violated",
+         {"expect_absent_sources": ["confluence:OPS/Driver pay bands FY27"]},
+         [_hit("confluence:OPS/Driver pay bands FY27")],
+         {}, "retrieval_absent", False),
+        ("absent-na",
+         {}, [_hit("confluence:OPS/TMS deploy checklist")],
+         {}, "retrieval_absent", None),
+        # precision: full path / H2-substring / wrong section / source-only
+        ("precision-full-path",
+         {"expected_sources": ["api-reference.md"],
+          "expected_sections": [_FULL_SECTION]},
+         [_hit("api-reference.md", section=_FULL_SECTION)],
+         {}, "precision", True),
+        ("precision-h2-substring",
+         {"expected_sources": ["api-reference.md"],
+          "expected_sections": ["Track a shipment"]},
+         [_hit("api-reference.md", section=_FULL_SECTION)],
+         {}, "precision", True),
+        ("precision-wrong-section",
+         {"expected_sources": ["api-reference.md"],
+          "expected_sections": ["Track a shipment"]},
+         [_hit("api-reference.md", section="Other")],
+         {}, "precision", False),
+        ("precision-source-only-hit",
+         {"expected_sources": ["confluence:OPS/TMS deploy checklist"]},
+         [_hit("confluence:OPS/TMS deploy checklist")],
+         {}, "precision", True),
+        ("precision-source-only-miss",
+         {"expected_sources": ["confluence:OPS/TMS deploy checklist"]},
+         [_hit("confluence:OPS/EDI retry policy")],
+         {}, "precision", False),
+        # rerank: improved / worse / target absent / no baseline
+        ("rerank-improved",
+         p_rank, after, {"hits_norerank": before},
+         "rerank", {"before": 2, "after": 1, "improved": True}),
+        ("rerank-worse",
+         p_rank, before, {"hits_norerank": after},
+         "rerank", {"before": 1, "after": 2, "improved": False}),
+        ("rerank-target-absent",
+         p_rank, [_hit("a.md")], {"hits_norerank": [_hit("a.md")]},
+         "rerank", {"before": None, "after": 1, "improved": None}),
+        ("rerank-na-no-baseline",
+         p_rank, after, {}, "rerank", None),
+        # accuracy: keywords all present / missing / no answer /
+        # no expectations / keywords_any present / missing
+        ("accuracy-keywords",
+         {"expect_keywords": ["90 days", "token_expired"]}, [],
+         {"answer_text": "Tokens last 90 days; 401 token_expired"},
+         "accuracy", True),
+        ("accuracy-keyword-missing",
+         {"expect_keywords": ["90 days", "token_expired"]}, [],
+         {"answer_text": "Tokens last 90 days"}, "accuracy", False),
+        ("accuracy-na-no-answer",
+         {"expect_keywords": ["90 days", "token_expired"]}, [],
+         {"answer_text": None}, "accuracy", None),
+        ("accuracy-na-no-expectations",
+         {}, [], {"answer_text": "anything"}, "accuracy", None),
+        ("accuracy-keywords-any-hit",
+         {"expect_keywords_any": ["getByRole", "get_by_role"]}, [],
+         {"answer_text": "use getByRole"}, "accuracy", True),
+        ("accuracy-keywords-any-miss",
+         {"expect_keywords_any": ["getByRole", "get_by_role"]}, [],
+         {"answer_text": "use locator"}, "accuracy", False),
     ]
-    assert ps._rate(rows, "retrieval") == (1, 2)
-    assert ps._rate(rows, "accuracy") == (0, 0)
-    assert ps._rerank_rate(rows) == (1, 1, 2, 2)
+
+
+_SCORING_CASES = _scoring_cases()
+
+
+@pytest.mark.parametrize(
+    "case_id,prompt_kwargs,hits,score_kwargs,field,expected",
+    _SCORING_CASES,
+    ids=[c[0] for c in _SCORING_CASES],
+)
+def test_score_prompt_scoring_matrix(case_id, prompt_kwargs, hits,
+                                     score_kwargs, field, expected):
+    row = ps.score_prompt(_prompt(**prompt_kwargs), hits, **score_kwargs)
+    assert row[field] == expected
+
+
+_AGGREGATION_ROWS = [
+    {"retrieval": True, "precision": True, "accuracy": None,
+     "rerank": {"before": 2, "after": 1, "improved": True}},
+    {"retrieval": False, "precision": False, "accuracy": None,
+     "rerank": {"before": None, "after": 1, "improved": None}},
+    {"retrieval": None, "precision": None, "accuracy": None, "rerank": None},
+]
+
+
+@pytest.mark.parametrize(
+    "probe,expected",
+    [
+        (lambda rows: ps._rate(rows, "retrieval"), (1, 2)),
+        (lambda rows: ps._rate(rows, "accuracy"), (0, 0)),
+        (ps._rerank_rate, (1, 1, 2, 2)),
+    ],
+    ids=["retrieval-rate", "accuracy-rate", "rerank-rate"],
+)
+def test_aggregation_counts_applicable_only(probe, expected):
+    # Only rows where the metric is not None count toward the denominator.
+    assert probe(_AGGREGATION_ROWS) == expected
 
 
 # --- run_source skip + stub behavior -----------------------------------------
