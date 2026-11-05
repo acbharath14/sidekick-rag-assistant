@@ -10,7 +10,6 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from . import tracing
 from .audit import log_question
-from .caching import get_cached_episodic_memory, get_cached_retriever
 from .config import Settings, get_llm, get_settings
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
@@ -264,19 +263,11 @@ def build_chain(
         ]
     )
     # Named so the step shows as "retrieve" in a Langfuse trace.
-    def _retrieve(q: str) -> list[Hit]:
-        hits = retriever.search(
+    retrieve = RunnableLambda(
+        lambda q: retriever.search(
             q, user_groups=groups, source_filter=source_filter
         )
-        # Record the generation-time hits so the caller can reuse them
-        # for citations instead of running retrieval a second time.
-        # `capture` is per-question state owned by the caller, never
-        # shared across requests.
-        if capture is not None:
-            capture["hits"] = hits
-        return hits
-
-    retrieve = RunnableLambda(_retrieve).with_config({"run_name": "retrieve"})
+    ).with_config({"run_name": "retrieve"})
 
     def _format_context(hits: list[Hit]) -> str:
         parts = []
@@ -311,8 +302,7 @@ def ask(
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
     settings.user_groups). retriever: inject a pre-built retriever (e.g.
-    an in-memory upload index); when omitted, the shared cached retriever
-    is used (see caching.py). document_id: scope retrieval to a single
+    an in-memory upload index). document_id: scope retrieval to a single
     uploaded document's chunks.
 
     Opens one Langfuse trace per question (a no-op when tracing is off).
@@ -397,11 +387,13 @@ def _ask_impl(
     if settings.hybrid_fallback and is_abstention(text):
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
-    # Citations reuse the hits generation already retrieved (see
-    # _generation_hits); only its fallback runs a second retrieval.
-    # Traced as its own span so the reuse is visible in the trace.
+    # Retrieval runs a second time here, after generation, to collect the
+    # citations for the answer. Traced as its own span so the duplication
+    # is visible in the trace.
     with tracing.span("retrieve-hits"):
-        hits = _generation_hits(capture, retriever, standalone, groups, source_filter)
+        hits = retriever.search(
+            standalone, user_groups=groups, source_filter=source_filter
+        )
     sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
@@ -570,11 +562,13 @@ def _stream_ask_impl(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
-    # Citations reuse the hits generation already retrieved (see
-    # _generation_hits); only its fallback runs a second retrieval.
-    # Traced as its own span so the reuse is visible in the trace.
+    # Retrieval runs a second time here, after generation, to collect the
+    # citations for the answer. Traced as its own span so the duplication
+    # is visible in the trace.
     with tracing.span("retrieve-hits"):
-        hits = _generation_hits(capture, retriever, standalone, groups, source_filter)
+        hits = retriever.search(
+            standalone, user_groups=groups, source_filter=source_filter
+        )
     answer = Answer(
         text=text,
         sources=sorted({h.source for h in hits}),

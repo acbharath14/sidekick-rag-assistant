@@ -358,6 +358,55 @@ model reload on CPU.
 - **Episodic memory** still uses LanceDB, unchanged — it records past
   Q&As for semantic recall across sessions.
 
+### Langfuse tracing (optional)
+
+Langfuse records one trace per question so you can see exactly where
+time goes: rewrite, retrieve, rerank, generate. Each span shows how
+long its step took. Summaries get their own traces too (single, map,
+reduce). This is the debugging tool for slow questions.
+
+Tracing is off by default. Nothing changes unless you set the keys.
+
+1. Start the Langfuse server (it runs on your machine only):
+   `docker compose -f docker-compose.langfuse.yml up -d`
+   Then open http://localhost:3000, create an account, and create a
+   project. The project page shows a public key and a secret key.
+2. Set the keys in your shell and restart the app:
+   ```
+   export LANGFUSE_BASE_URL=http://localhost:3000
+   export LANGFUSE_PUBLIC_KEY=pk-lf-...
+   export LANGFUSE_SECRET_KEY=sk-lf-...
+   ./scripts/dev.sh
+   ```
+   The keys are secrets. Keep them in your shell only and never commit
+   them.
+3. Ask a question in the chat. In Langfuse, open Traces and click the
+   `sidekick-question` trace. Expand the spans: `rewrite`,
+   `retrieve`, `rerank`, `generate`. The span lengths are the timings.
+   The second `retrieve-hits` span is the retrieval that runs again
+   after generation to collect the citations for the answer.
+
+To turn tracing off, unset the keys and restart dev.sh. With the keys
+unset, no trace leaves the machine and the app behaves exactly as
+before.
+
+Notes:
+- The compose file also starts Postgres, ClickHouse, Redis, and Minio
+  (object storage) for Langfuse. Stop everything with
+  `docker compose -f docker-compose.langfuse.yml down`. Data stays in
+  Docker volumes.
+- The passwords in docker-compose.langfuse.yml are marked CHANGEME.
+  They are fine for local-only use on your own machine. Change them if
+  the ports are ever reachable from anywhere else.
+- Follow-up rewrites run in a worker thread, so a rewrite shows as its
+  own trace instead of nesting under the question trace. The timing is
+  still there. The same applies to summarize calls, which also run in a
+  worker thread.
+- The agentic loop (agent.py) is not traced yet. Only the classic chat
+  path (ask and stream_ask) and summarization are traced.
+- `scripts/check_prereqs.sh` warns (never fails) when the keys are set
+  but the Langfuse server is not reachable.
+
 ## MCP client setup
 
 Add to your MCP client config (e.g. Claude Code):

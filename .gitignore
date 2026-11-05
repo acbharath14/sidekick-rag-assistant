@@ -8,6 +8,8 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 chats/
+# Local secrets (Langfuse keys, etc.) — never commit.
+.env
 # React frontend (web/)
 web/node_modules/
 web/dist/
