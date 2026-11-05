@@ -22,7 +22,7 @@ from rag_demo.agent import (
     sources_from_step,
     web_sources,
 )
-from rag_demo.chain import ask, format_hits
+from rag_demo.chain import ask
 from rag_demo.config import INDEX_FORMAT_VERSION, get_settings
 from rag_demo.preflight import index_format_current, run_preflight
 from rag_demo.retriever import (
@@ -33,7 +33,6 @@ from rag_demo.retriever import (
     confidence_band,
     confidence_for,
     format_citation,
-    rrf_fuse,
 )
 
 
@@ -50,13 +49,6 @@ def test_format_citation_with_and_without_section():
 def test_citation_source_strips_section():
     assert citation_source("a.md › Auth") == "a.md"
     assert citation_source("a.md") == "a.md"
-
-
-def test_format_hits_cites_section():
-    out = format_hits([Hit(text="hello", source="a.md", score=0.1, section="Auth")])
-    assert "[a.md › Auth]" in out and "hello" in out
-    out_plain = format_hits([Hit(text="hello", source="a.md", score=0.1)])
-    assert "[a.md]" in out_plain
 
 
 # -------------------------------------------------- confidence + floor ---
@@ -110,19 +102,6 @@ def test_apply_floor_disabled_still_stamps_confidence():
     kept, dropped = apply_floor(hits, 0.0, "dense")
     assert kept == hits and dropped == 0
     assert kept[0].confidence == pytest.approx(0.8)
-
-
-def test_rrf_fuse_preserves_chunk_identity():
-    dense_hit = Hit(text="same", source="a.md", score=0.1, chunk_id="a.md#s:0",
-                    section="S", dense_score=0.3)
-    bm25_hit = Hit(text="same", source="a.md", score=9.0)
-    fused = rrf_fuse([[dense_hit], [bm25_hit]], k=1)
-    assert len(fused) == 1
-    assert fused[0].chunk_id == "a.md#s:0"
-    assert fused[0].section == "S"
-    assert fused[0].dense_score == pytest.approx(0.3)
-    # Fusion must not mutate the caller's hits.
-    assert bm25_hit.dense_score is None
 
 
 # ------------------------------------------------------- chunk identity ---

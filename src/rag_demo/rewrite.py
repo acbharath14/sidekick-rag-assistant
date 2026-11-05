@@ -8,6 +8,8 @@ so single-turn latency is unchanged.
 
 from __future__ import annotations
 
+from . import tracing
+
 REWRITE_PROMPT = """Rewrite the follow-up question as a standalone question, using the chat history for context. Reply with ONLY the rewritten question, no preamble.
 
 Chat history:
@@ -34,7 +36,10 @@ def rewrite_query(question: str, history: list[tuple[str, str]], llm) -> str:
             history=format_history(history), question=question
         )
         try:
-            out = llm.invoke(prompt)
+            # The rewrite runs in a worker thread, so its Langfuse run
+            # shows as its own trace instead of nesting under the
+            # question trace. The timing is still there.
+            out = tracing.invoke_llm(llm, prompt, run_name="rewrite")
         except Exception:
             # Rewrite failed (e.g. LLM unreachable) — fall back to the raw
             # question rather than breaking the follow-up entirely.
