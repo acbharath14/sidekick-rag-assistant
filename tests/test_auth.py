@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from fastapi.testclient import TestClient
 
+import pytest
+
 from rag_demo.api import app
 
 client = TestClient(app)
@@ -67,18 +69,16 @@ def test_key_set_correct_header_ok():
     assert r.status_code == 200
 
 
-def test_key_set_wrong_header_401():
-    """(c) Key set + wrong key -> 401 with the exact detail body."""
+@pytest.mark.parametrize(
+    "headers",
+    [{"X-API-Key": "wrong-key"}, {}],
+    ids=["wrong-key", "no-header"],
+)
+def test_key_set_rejects_invalid_or_missing_key_401(headers):
+    """(c)/(d) Key set + wrong or missing key -> 401 with the exact detail
+    body. Same polarity (both denied), so one parameterized test."""
     set_key(KEY)
-    r = client.get("/api/config", headers={"X-API-Key": "wrong-key"})
-    assert r.status_code == 401
-    assert r.json() == {"detail": "Invalid or missing API key"}
-
-
-def test_key_set_missing_header_401():
-    """(d) Key set + no header -> 401 with the exact detail body."""
-    set_key(KEY)
-    r = client.get("/api/config")
+    r = client.get("/api/config", headers=headers)
     assert r.status_code == 401
     assert r.json() == {"detail": "Invalid or missing API key"}
 
