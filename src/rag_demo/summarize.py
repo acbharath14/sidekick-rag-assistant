@@ -25,6 +25,7 @@ import time
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from . import tracing
 from .config import Settings, get_llm, get_settings
 from .observability import record_ollama_error, record_ollama_timeout
 
@@ -70,10 +71,14 @@ RAW_SECTION_TEMPLATE = (
 )
 
 
-def _invoke_once(llm, prompt: str, timeout: float | None = None) -> tuple[str, str]:
+def _invoke_once(
+    llm, prompt: str, timeout: float | None = None, run_name: str | None = None
+) -> tuple[str, str]:
     """Single LLM attempt.
 
     Returns (text, status) where status is "ok", "timeout", or "error".
+    run_name names the Langfuse run when tracing is on (e.g.
+    "summarize-single"); None leaves the call untraced.
     """
     import concurrent.futures
     import os
@@ -84,7 +89,10 @@ def _invoke_once(llm, prompt: str, timeout: float | None = None) -> tuple[str, s
         timeout = float(os.environ.get("RAG_DEMO_SUMMARY_TIMEOUT", "600"))
 
     def _do():
-        out = llm.invoke(prompt)
+        # Runs in a worker thread, so its Langfuse run shows as its own
+        # trace instead of nesting under the question trace. The timing
+        # is still there.
+        out = tracing.invoke_llm(llm, prompt, run_name=run_name)
         text = out.content if hasattr(out, "content") else str(out)
         return strip_think(text.strip())
 
@@ -103,9 +111,9 @@ def _invoke_once(llm, prompt: str, timeout: float | None = None) -> tuple[str, s
         ex.shutdown(wait=False, cancel_futures=True)
 
 
-def _invoke(llm, prompt: str, timeout: float | None = None) -> str:
+def _invoke(llm, prompt: str, timeout: float | None = None, run_name: str | None = None) -> str:
     """Invoke the LLM with a timeout; returns '' on timeout/failure."""
-    text, _ = _invoke_once(llm, prompt, timeout)
+    text, _ = _invoke_once(llm, prompt, timeout, run_name=run_name)
     return text
 
 
@@ -115,18 +123,19 @@ def _invoke_with_retry(
     timeout: float | None = None,
     attempts: int = RETRY_ATTEMPTS,
     backoff: tuple[float, ...] = RETRY_BACKOFF_SECONDS,
+    run_name: str | None = None,
 ) -> tuple[str, str]:
     """Invoke with retries for transient errors.
 
     Only "error" outcomes are retried — timeouts go straight to the caller
     (see module docstring for why). Returns (text, status).
     """
-    text, status = _invoke_once(llm, prompt, timeout)
+    text, status = _invoke_once(llm, prompt, timeout, run_name=run_name)
     for wait in backoff[: max(0, attempts - 1)]:
         if status != "error":
             break
         time.sleep(wait)
-        text, status = _invoke_once(llm, prompt, timeout)
+        text, status = _invoke_once(llm, prompt, timeout, run_name=run_name)
     return text, status
 
 
@@ -135,7 +144,9 @@ def _reduce_summaries(partials: list[str], llm, timeout: float | None = None) ->
     too large for a single comfortable reduce call."""
     combined = "\n\n".join(partials)
     if len(combined) <= REDUCE_LIMIT_CHARS or len(partials) <= 1:
-        result, status = _invoke_with_retry(llm, REDUCE_PROMPT.format(summaries=combined), timeout)
+        result, status = _invoke_with_retry(
+            llm, REDUCE_PROMPT.format(summaries=combined), timeout, run_name="summarize-reduce"
+        )
         _record_llm_outcome(status)
         return result
     mid = len(partials) // 2
@@ -162,7 +173,9 @@ def summarize_events(text: str, settings: Settings | None = None):
         llm = get_llm(settings)
         if len(text) <= SINGLE_CALL_CHARS:
             yield {"type": "start", "mode": "single", "total": 1}
-            result, status = _invoke_with_retry(llm, SUMMARY_PROMPT.format(text=text))
+            result, status = _invoke_with_retry(
+                llm, SUMMARY_PROMPT.format(text=text), run_name="summarize-single"
+            )
             _record_llm_outcome(status)
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
             yield {"type": "done", "summary": summary}
@@ -176,7 +189,9 @@ def summarize_events(text: str, settings: Settings | None = None):
         partials = []
         raw_fallbacks = 0
         for i, c in enumerate(chunks, 1):
-            p, status = _invoke_with_retry(llm, MAP_PROMPT.format(chunk=c))
+            p, status = _invoke_with_retry(
+                llm, MAP_PROMPT.format(chunk=c), run_name="summarize-map"
+            )
             _record_llm_outcome(status)
             if p:
                 partials.append(p)
