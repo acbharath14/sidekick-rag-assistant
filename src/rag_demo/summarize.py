@@ -34,9 +34,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from . import tracing
 from .config import Settings, get_llm, get_settings
+from .observability import record_ollama_error, record_ollama_timeout
 from .ollama_guard import TRACKER, track_call
 
 logger = logging.getLogger(__name__)
+
+
+def _record_llm_outcome(status: str) -> None:
+    """Count an LLM call that did not return text. Only the outcome is
+    counted here; the API layer counts the summarize itself, so one
+    summarize is never counted twice."""
+    if status == "timeout":
+        record_ollama_timeout()
+    elif status == "error":
+        record_ollama_error()
 
 SINGLE_CALL_CHARS = 6000
 CHUNK_CHARS = 4000
@@ -166,7 +177,7 @@ def _reduce_summaries(
     too large for a single comfortable reduce call."""
     combined = "\n\n".join(partials)
     if len(combined) <= REDUCE_LIMIT_CHARS or len(partials) <= 1:
-        result, _ = _invoke_with_retry(
+        result, status = _invoke_with_retry(
             llm,
             REDUCE_PROMPT.format(summaries=combined),
             timeout,
@@ -174,6 +185,7 @@ def _reduce_summaries(
             backoff,
             run_name="summarize-reduce",
         )
+        _record_llm_outcome(status)
         return result
     mid = len(partials) // 2
     left = _reduce_summaries(partials[:mid], llm, timeout, attempts, backoff)
@@ -204,7 +216,7 @@ def summarize_events(text: str, settings: Settings | None = None):
         llm = get_llm(settings)
         if len(text) <= SINGLE_CALL_CHARS:
             yield {"type": "start", "mode": "single", "total": 1}
-            result, _ = _invoke_with_retry(
+            result, status = _invoke_with_retry(
                 llm,
                 SUMMARY_PROMPT.format(text=text),
                 timeout,
@@ -212,6 +224,7 @@ def summarize_events(text: str, settings: Settings | None = None):
                 backoff,
                 run_name="summarize-single",
             )
+            _record_llm_outcome(status)
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
             yield {"type": "done", "summary": summary}
             return
@@ -224,7 +237,7 @@ def summarize_events(text: str, settings: Settings | None = None):
         partials = []
         raw_fallbacks = 0
         for i, c in enumerate(chunks, 1):
-            p, _ = _invoke_with_retry(
+            p, status = _invoke_with_retry(
                 llm,
                 MAP_PROMPT.format(chunk=c),
                 timeout,
@@ -232,6 +245,7 @@ def summarize_events(text: str, settings: Settings | None = None):
                 backoff,
                 run_name="summarize-map",
             )
+            _record_llm_outcome(status)
             if p:
                 partials.append(p)
             else:

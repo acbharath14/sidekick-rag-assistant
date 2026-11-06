@@ -13,6 +13,7 @@ Endpoints:
                          Ollama queue snapshot (in-flight calls, waits,
                          timeouts, retries)
   GET  /api/config       safe settings subset (no secrets)
+  GET  /api/metrics      in-memory counters + latency summaries (no new dep)
   POST /api/feedback     thumbs up/down vote (persisted via audit.log_feedback)
   POST /api/upload       upload a document into the PERSISTENT FAISS index
   GET  /api/documents            list uploaded documents
@@ -60,6 +61,19 @@ from .ollama_guard import (
     run_with_timeout,
 )
 from . import conversations as conv_store
+from .observability import (
+    FILENAME_PREVIEW_CHARS,
+    get_metrics_snapshot,
+    log_error_event,
+    log_event,
+    log_summarize_event,
+    log_upload_event,
+    new_request_id,
+    record_summarize,
+    record_upload,
+    truncate_preview,
+)
+from .summarize import SINGLE_CALL_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +295,7 @@ def _document_exists(doc_id: str | None) -> str | None:
 
 @app.post("/api/chat", dependencies=_auth)
 def chat(req: ChatRequest) -> dict:
+    request_id = new_request_id()
     conv_id = req.conversation_id
     if conv_id and conv_store.conversation_exists(conv_id):
         conv_store.add_message(conv_id, "user", req.question)
@@ -288,6 +303,8 @@ def chat(req: ChatRequest) -> dict:
     else:
         conv_id = None
         new_title = None
+    # LLM failures are counted and logged inside ask(); they still
+    # propagate as 500s, exactly as before.
     # Request deadline (settings.chat_timeout_seconds, 330s by default):
     # a hung Ollama call fails fast with 504 instead of hanging the
     # request. Transient Ollama errors surface as 502 once the bounded
@@ -299,6 +316,8 @@ def chat(req: ChatRequest) -> dict:
                 req.question,
                 history=req.history or [],
                 document_id=_document_exists(req.document_id),
+                request_id=request_id,
+                endpoint="/api/chat",
             ),
             settings.chat_timeout_seconds,
             label="chat",
@@ -333,6 +352,7 @@ def chat(req: ChatRequest) -> dict:
 
 @app.post("/api/chat/stream", dependencies=_auth)
 async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
+    request_id = new_request_id()
     doc_id = _document_exists(req.document_id)
     conv_id = (
         req.conversation_id
@@ -350,7 +370,11 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
         try:
             async for event in _drive_stream(
                 stream_ask(
-                    req.question, history=req.history or [], document_id=doc_id
+                    req.question,
+                    history=req.history or [],
+                    document_id=doc_id,
+                    request_id=request_id,
+                    endpoint="/api/chat/stream",
                 ),
                 request,
                 label="chat",
@@ -486,6 +510,16 @@ def config() -> dict:
     }
 
 
+@app.get("/api/metrics", dependencies=_auth)
+def metrics() -> dict:
+    """In-memory counters and latency summaries (see observability.py).
+    No new dependency, no persistence: counts reset on restart. The
+    cache section reports hits/reloads when the caching module exposes
+    cache_stats(); until then it reports the chain call-site counters
+    and available=False."""
+    return get_metrics_snapshot()
+
+
 @app.post("/api/feedback", dependencies=_auth)
 def feedback(req: FeedbackRequest) -> dict:
     if req.vote not in ("up", "down"):
@@ -505,25 +539,44 @@ async def upload(file: UploadFile = File(...)) -> dict:
     separate on-demand call.
     """
     import json as _json
+    import time as _time
 
     from langchain_community.vectorstores import FAISS
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     from .extract import UnsupportedFormat, extract_text_with_meta, verify_magic_bytes
 
+    request_id = new_request_id()
+    _started = _time.perf_counter()
+    _filename = file.filename or "upload"
+
+    def _fail(error: str) -> dict:
+        # No behavior change: same error body as before, only counted
+        # and logged (filename only, never file content).
+        record_upload((_time.perf_counter() - _started) * 1000, ok=False)
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/upload",
+            where="upload",
+            error_type="UploadError",
+            error=error,
+            filename=truncate_preview(_filename, FILENAME_PREVIEW_CHARS),
+        )
+        return {"ok": False, "error": error}
+
     settings = get_settings()
     max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
     data = await file.read()
     if len(data) > max_mb * 1024 * 1024:
-        return {"ok": False, "error": f"File too large (over {max_mb:.0f} MB)."}
+        return _fail(f"File too large (over {max_mb:.0f} MB).")
     try:
         if not verify_magic_bytes(file.filename or "upload", data):
-            return {"ok": False, "error": "File content doesn't match its extension."}
+            return _fail("File content doesn't match its extension.")
         text, extractor = extract_text_with_meta(file.filename or "upload", data)
     except UnsupportedFormat as e:
-        return {"ok": False, "error": str(e)}
+        return _fail(str(e))
     except Exception as e:
-        return {"ok": False, "error": f"Couldn't read {file.filename}: {e}"}
+        return _fail(f"Couldn't read {file.filename}: {e}")
     if not text.strip() and (file.filename or "").lower().endswith(".pdf"):
         # Scanned PDF with no embedded text — fall back to OCR, mirroring
         # the old Streamlit app. ocr.py is imported lazily so nothing breaks
@@ -534,21 +587,17 @@ async def upload(file: UploadFile = File(...)) -> dict:
             try:
                 text = ocr_pdf(data)
             except RuntimeError as e:
-                return {
-                    "ok": False,
-                    "error": f"No text found in {file.filename} (scanned PDF). {e}",
-                }
+                return _fail(
+                    f"No text found in {file.filename} (scanned PDF). {e}"
+                )
             if text.strip():
                 extractor = "ocr"
         else:
-            return {
-                "ok": False,
-                "error": (
-                    f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
-                ),
-            }
+            return _fail(
+                f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
+            )
     if not text.strip():
-        return {"ok": False, "error": f"No text found in {file.filename}."}
+        return _fail(f"No text found in {file.filename}.")
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
@@ -596,6 +645,18 @@ async def upload(file: UploadFile = File(...)) -> dict:
         extractor,
     )
     _upload_texts[doc_id] = text
+    _latency_ms = (_time.perf_counter() - _started) * 1000
+    record_upload(_latency_ms, ok=True)
+    log_upload_event(
+        request_id=request_id,
+        doc_id=doc_id,
+        filename=_filename,
+        chunks=len(chunks),
+        chars=len(text),
+        size_bytes=len(data),
+        extractor=extractor,
+        latency_ms=_latency_ms,
+    )
     # The on-disk index changed, so the cached retriever would keep
     # serving the old vectors. Drop it; the next question reloads.
     # (Caching contract, see caching.py.)
@@ -632,11 +693,31 @@ def get_document(doc_id: str) -> dict:
 @app.post("/api/documents/{doc_id}/summarize", dependencies=_auth)
 def summarize_document(doc_id: str) -> dict:
     """(Re)generate the LLM summary for a document and cache it in SQLite."""
+    import time as _time
+
+    request_id = new_request_id()
+    _started = _time.perf_counter()
     doc = conv_store.get_document(doc_id)
     if not doc:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize",
+            where="summarize",
+            error_type="NotFound",
+            error="Document not found.",
+            doc_id=doc_id,
+        )
         return {"ok": False, "error": "Document not found."}
     text = _upload_texts.get(doc_id)
     if not text:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize",
+            where="summarize",
+            error_type="NotFound",
+            error="Document text no longer in memory (restarted since upload).",
+            doc_id=doc_id,
+        )
         return {
             "ok": False,
             "error": "Document text no longer in memory (restarted since upload)."
@@ -657,9 +738,28 @@ def summarize_document(doc_id: str) -> dict:
             "error": "Summarization timed out. Try again with a shorter document.",
         }
     except Exception as e:
+        _latency_ms = (_time.perf_counter() - _started) * 1000
+        record_summarize(_latency_ms, ok=False)
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize",
+            where="summarize",
+            error_type=type(e).__name__,
+            error=str(e),
+            doc_id=doc_id,
+        )
         return {"ok": False, "error": f"Summarize failed: {type(e).__name__}: {e}"}
     summary = summary or "Summary returned empty."
     conv_store.set_document_summary(doc_id, summary)
+    _latency_ms = (_time.perf_counter() - _started) * 1000
+    record_summarize(_latency_ms, ok=True)
+    log_summarize_event(
+        request_id=request_id,
+        doc_id=doc_id,
+        mode="single" if len(text) <= SINGLE_CALL_CHARS else "map_reduce",
+        chars=len(text),
+        latency_ms=_latency_ms,
+    )
     return {"ok": True, "summary": summary}
 
 
@@ -677,16 +777,36 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
     If the client disconnects mid-summary, generation is cancelled (see
     _drive_stream) and nothing is cached: no partial summary is stored.
     """
+    import time as _time
+
+    request_id = new_request_id()
+    _started = _time.perf_counter()
 
     def _error_event(message: str):
         yield f"data: {json.dumps({'type': 'error', 'error': message})}\n\n"
 
     doc = conv_store.get_document(doc_id)
     if not doc:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize/stream",
+            where="summarize",
+            error_type="NotFound",
+            error="Document not found.",
+            doc_id=doc_id,
+        )
         return StreamingResponse(_error_event("Document not found."),
                                  media_type="text/event-stream")
     text = _upload_texts.get(doc_id)
     if not text:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize/stream",
+            where="summarize",
+            error_type="NotFound",
+            error="Document text no longer in memory (restarted since upload).",
+            doc_id=doc_id,
+        )
         return StreamingResponse(
             _error_event("Document text no longer in memory (restarted since upload)."
                          " Re-upload to summarize."),
@@ -698,6 +818,7 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
 
         settings = get_settings()
         final: str | None = None
+        mode = "single" if len(text) <= SINGLE_CALL_CHARS else "map_reduce"
         try:
             async for event in _drive_stream(
                 iter_with_idle_timeout(
@@ -710,6 +831,26 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
             ):
                 if event["type"] == "done":
                     final = event["summary"]
+                    _latency_ms = (_time.perf_counter() - _started) * 1000
+                    record_summarize(_latency_ms, ok=True)
+                    log_summarize_event(
+                        request_id=request_id,
+                        doc_id=doc_id,
+                        mode=mode,
+                        chars=len(text),
+                        latency_ms=_latency_ms,
+                    )
+                elif event["type"] == "error":
+                    _latency_ms = (_time.perf_counter() - _started) * 1000
+                    record_summarize(_latency_ms, ok=False)
+                    log_error_event(
+                        request_id=request_id,
+                        endpoint="/api/documents/{id}/summarize/stream",
+                        where="summarize",
+                        error_type="SummarizeError",
+                        error=event.get("error", ""),
+                        doc_id=doc_id,
+                    )
                 yield f"data: {json.dumps(event)}\n\n"
         except OllamaTimeoutError:
             yield (
@@ -740,6 +881,14 @@ def delete_document(doc_id: str) -> dict:
 
     doc = conv_store.delete_document(doc_id)
     if not doc:
+        log_error_event(
+            request_id=new_request_id(),
+            endpoint="/api/documents/{id}",
+            where="delete_document",
+            error_type="NotFound",
+            error="Document not found.",
+            doc_id=doc_id,
+        )
         return {"ok": False, "error": "Document not found."}
     source_name = f"upload:{doc_id}"
     settings = get_settings()
@@ -771,6 +920,11 @@ def delete_document(doc_id: str) -> dict:
         # If nothing remains, leave the (now empty) index files as-is;
         # the next upload will recreate the index.
     _upload_texts.pop(doc_id, None)
+    log_event(
+        "document_delete",
+        request_id=new_request_id(),
+        doc_id=doc_id,
+    )
     # chunks.json / the FAISS index changed on disk; drop the cached
     # retriever so the next question sees the deletion.
     clear_cache()
