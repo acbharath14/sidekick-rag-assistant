@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
 from . import tracing
 from .audit import log_question
+from .caching import get_cached_retriever
 from .config import Settings, get_llm, get_settings
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
