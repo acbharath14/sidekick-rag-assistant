@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 import rag_demo.api as api
 from rag_demo.api import app
+from rag_demo.caching import clear_cache
 
 client = TestClient(app)
 
@@ -87,6 +88,10 @@ def _log_lines(capsys):
 
 def test_question_emits_structured_log_line(capsys):
     capsys.readouterr()
+    # Drop the cached retriever so this question builds a fresh one:
+    # the retriever cache is shared across the session, so without this
+    # an earlier test's question would make this one a cache hit.
+    clear_cache()
     r = client.post("/api/chat",
                     json={"question": "What is the max parcel weight?"})
     assert r.status_code == 200
@@ -109,7 +114,8 @@ def test_question_emits_structured_log_line(capsys):
     assert isinstance(line["hits"], int)
     assert isinstance(line["sources"], list)
     assert isinstance(line["grounded"], bool)
-    # On main every default-path question builds a fresh retriever.
+    # The cache was cleared at the start of this test, so this question
+    # builds a fresh retriever.
     assert line["cache_reload"] is True
     # The fake answer text must never appear in any log line.
     blob = "\n".join(_json.dumps(entry) for entry in lines)
@@ -560,7 +566,8 @@ def test_chat_timeout_returns_504(monkeypatch):
 
     import rag_demo.api as api_mod
 
-    def _slow(question, history=None, document_id=None):
+    def _slow(question, history=None, document_id=None,
+              request_id=None, endpoint=None):
         time.sleep(2)
         return None
 
@@ -575,7 +582,8 @@ def test_chat_transient_failure_returns_502(monkeypatch):
     """Ollama down after retries surfaces as 502, not a bare 500."""
     import rag_demo.api as api_mod
 
-    def _down(question, history=None, document_id=None):
+    def _down(question, history=None, document_id=None,
+              request_id=None, endpoint=None):
         raise ConnectionError("connection refused")
 
     monkeypatch.setattr(api_mod, "ask", _down)
@@ -589,7 +597,8 @@ def test_chat_stream_timeout_yields_error_event(monkeypatch):
     import rag_demo.api as api_mod
     from rag_demo.ollama_guard import OllamaTimeoutError
 
-    def _stalled(question, history=None, document_id=None):
+    def _stalled(question, history=None, document_id=None,
+                 request_id=None, endpoint=None):
         yield {"token": "partial"}
         raise OllamaTimeoutError("stalled")
 
