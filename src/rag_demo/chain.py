@@ -2,16 +2,36 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
+<<<<<<< HEAD
+=======
+from . import caching
+>>>>>>> origin/main
 from . import tracing
 from .audit import log_question
 from .caching import get_cached_episodic_memory, get_cached_retriever
 from .config import Settings, get_llm, get_settings
+from .observability import (
+    log_error_event,
+    log_question_event,
+    new_request_id,
+    record_cache_hit,
+    record_cache_reload,
+    record_llm_error,
+    record_question,
+)
+from .ollama_guard import (
+    OllamaTimeoutError,
+    call_with_timeout_and_retry,
+    invoke_llm,
+    iter_with_idle_timeout,
+)
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
 
@@ -151,28 +171,60 @@ def is_small_talk(question: str) -> bool:
     return q in SMALL_TALK_PATTERNS
 
 
-def small_talk_answer(question: str, llm) -> str:
+def small_talk_answer(question: str, llm, settings: Settings | None = None) -> str:
     """Brief friendly response without retrieval or citations."""
     prompt = (
         "The user said: \"" + question + "\"\n"
         "Respond briefly and warmly (1-2 sentences). You are Sidekick, "
         "a helpful RAG assistant. Do not mention sources or citations."
     )
+<<<<<<< HEAD
     out = tracing.invoke_llm(llm, prompt, run_name="small-talk")
     text = out.content if hasattr(out, "content") else str(out)
     return strip_think(text).strip()
+=======
+    # Tracing span wraps the guarded call: the span records the call
+    # timing while the guard owns the invoke (timeout plus retry).
+    with tracing.span("small-talk"):
+        return strip_think(invoke_llm(llm, prompt, settings, label="small-talk").strip())
+>>>>>>> origin/main
 
 
-def general_knowledge_answer(question: str, llm) -> str:
+def general_knowledge_answer(question: str, llm, settings: Settings | None = None) -> str:
     """Direct general-knowledge answer, bypassing retrieval."""
     prompt = (
         "Answer the following question from your general knowledge. "
         "Be concise and accurate.\n\nQuestion: " + question
     )
+<<<<<<< HEAD
     out = tracing.invoke_llm(llm, prompt, run_name="general-knowledge")
     text = out.content if hasattr(out, "content") else str(out)
     text = strip_think(text)
+=======
+    # Tracing span wraps the guarded call (see small_talk_answer).
+    with tracing.span("general-knowledge"):
+        text = strip_think(invoke_llm(llm, prompt, settings, label="general-knowledge"))
+>>>>>>> origin/main
     return "🌐 General knowledge (not from your corpus).\n" + text.strip()
+
+
+def _invoke_chain(chain, standalone: str, settings: Settings, config=None) -> str:
+    """One generation call with the shared timeout and retry policy.
+
+    The whole chain (retrieve plus LLM) runs in a worker thread with the
+    model deadline; transient Ollama errors are retried with backoff and
+    timeouts fail fast as OllamaTimeoutError, never retried. Retrying
+    re-runs the local retrieval too, which is cheap (local FAISS/BM25).
+    config carries the Langfuse run config (None when tracing is off);
+    LangChain runnables accept config=None.
+    """
+    return call_with_timeout_and_retry(
+        lambda: chain.invoke(standalone, config=config),
+        timeout=settings.llm_timeout_seconds,
+        attempts=settings.llm_retry_attempts,
+        backoff=settings.llm_retry_backoff_seconds,
+        label="chat",
+    )
 
 
 @dataclass
@@ -209,6 +261,17 @@ def format_episodic(episodes: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+<<<<<<< HEAD
+=======
+def _model_name(settings: Settings) -> str:
+    """Display model for logs (same rule as audit.log_question)."""
+    return (
+        settings.ollama_model
+        if settings.llm_provider == "ollama"
+        else settings.llm_provider
+    )
+
+>>>>>>> origin/main
 def _generation_hits(
     capture: dict,
     retriever: Retriever,
@@ -238,6 +301,10 @@ def build_chain(
     user_groups: list[str] | None = None,
     episodic_context: str = "",
     document_id: str | None = None,
+<<<<<<< HEAD
+=======
+    timings: dict | None = None,
+>>>>>>> origin/main
     capture: dict | None = None,
 ):
     settings = settings or get_settings()
@@ -247,7 +314,22 @@ def build_chain(
     # retriever (e.g. an in-memory upload index) still wins and is never
     # cached. Loading stays lazy: nothing is built at import time, the
     # first question pays the load. See caching.py.
+<<<<<<< HEAD
     retriever = retriever or get_cached_retriever(settings)
+=======
+    if retriever is None:
+        # Hit-or-miss check around the cached call (PR #57 merge
+        # recipe): snapshot the key first; a hit counts as a hit, a
+        # miss builds and counts as a reload. An explicitly passed
+        # retriever is neither and is not counted.
+        _key = caching._retriever_key(settings)
+        _was_cached = _key in caching._RETRIEVERS
+        retriever = get_cached_retriever(settings)
+        if _was_cached:
+            record_cache_hit()
+        else:
+            record_cache_reload()
+>>>>>>> origin/main
     # Resolve groups once: the SAME filtered hits feed the prompt AND the
     # returned answer. Never let the LLM see what the user may not.
     groups = user_groups if user_groups is not None else settings.user_groups
@@ -264,12 +346,34 @@ def build_chain(
         ]
     )
     def _retrieve(q: str) -> list[Hit]:
+<<<<<<< HEAD
         # The one retrieval per question: store the hits in `capture` so
         # the answer reuses them for citations instead of searching again.
         hits = retriever.search(q, user_groups=groups, source_filter=source_filter)
         if capture is not None:
             capture["hits"] = hits
         return hits
+=======
+        # Time the retrieval inside the chain so ask()/stream_ask()
+        # can report retrieve_ms separately from generate_ms. Rerank
+        # time stays inside retrieve_ms (see observability.py).
+        # The one retrieval per question: store the hits in `capture` so
+        # the answer reuses them for citations instead of searching again.
+        _t0 = time.perf_counter()
+        try:
+            hits = retriever.search(
+                q, user_groups=groups, source_filter=source_filter
+            )
+            if capture is not None:
+                capture["hits"] = hits
+            return hits
+        finally:
+            if timings is not None:
+                timings["retrieve_ms"] = (
+                    timings.get("retrieve_ms") or 0.0
+                ) + (time.perf_counter() - _t0) * 1000
+                timings["retrieve_calls"] = timings.get("retrieve_calls", 0) + 1
+>>>>>>> origin/main
 
     # Named so the step shows as "retrieve" in a Langfuse trace.
     retrieve = RunnableLambda(_retrieve).with_config({"run_name": "retrieve"})
@@ -303,11 +407,14 @@ def ask(
     user_groups: list[str] | None = None,
     retriever: Retriever | None = None,
     document_id: str | None = None,
+    request_id: str | None = None,
+    endpoint: str | None = None,
 ) -> Answer:
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
     settings.user_groups). retriever: inject a pre-built retriever (e.g.
     an in-memory upload index). document_id: scope retrieval to a single
+<<<<<<< HEAD
     uploaded document's chunks.
 
     Opens one Langfuse trace per question (a no-op when tracing is off).
@@ -336,14 +443,88 @@ def _ask_impl(
     document_id: str | None = None,
 ) -> Answer:
     import time
+=======
+    uploaded document's chunks. request_id/endpoint: carried into the
+    structured log line (api.py supplies them; direct callers get a
+    generated id and endpoint "direct").
+>>>>>>> origin/main
 
+    Opens one Langfuse trace per question (a no-op when tracing is off).
+    """
+    settings = settings or get_settings()
+    metadata = {"model": settings.ollama_model}
+    if document_id:
+        metadata["document_id"] = document_id
+    with tracing.question_span(question, metadata=metadata):
+        return _ask_impl(
+            question,
+            settings=settings,
+            history=history,
+            user_groups=user_groups,
+            retriever=retriever,
+            document_id=document_id,
+            request_id=request_id,
+            endpoint=endpoint,
+        )
+
+
+def _ask_impl(
+    question: str,
+    settings: Settings | None = None,
+    history: list[tuple[str, str]] | None = None,
+    user_groups: list[str] | None = None,
+    retriever: Retriever | None = None,
+    document_id: str | None = None,
+    request_id: str | None = None,
+    endpoint: str | None = None,
+) -> Answer:
+    import time
     settings = settings or get_settings()
     history = history or []
+    request_id = request_id or new_request_id()
+    model = _model_name(settings)
     llm = get_llm(settings)
     # Small talk bypasses retrieval entirely — no need to search the corpus
     # for "hi".
     if is_small_talk(question):
-        text = small_talk_answer(question, llm)
+        _t0 = time.perf_counter()
+        try:
+            text = small_talk_answer(question, llm, settings)
+        except Exception as e:
+            record_llm_error(e)
+            log_error_event(
+                request_id=request_id,
+                endpoint=endpoint,
+                where="generate",
+                error_type=type(e).__name__,
+                error=str(e),
+                model=model,
+            )
+            raise
+        _ms = (time.perf_counter() - _t0) * 1000
+        timings: dict = {
+            "rewrite_ms": None,
+            "episodic_ms": None,
+            "retrieve_ms": None,
+            "retrieve_calls": 0,
+            "generate_ms": _ms,
+            "total_ms": _ms,
+        }
+        record_question(timings, streamed=False)
+        log_question_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            model=model,
+            question=question,
+            timings=timings,
+            hits=0,
+            sources=[],
+            grounded=True,
+            weak_evidence=False,
+            standalone=False,
+            streamed=False,
+            cache_reload=False,
+        )
         return Answer(
             text=text,
             sources=[],
@@ -359,7 +540,19 @@ def _ask_impl(
     # context override the user's actual question. The cached instance is
     # shared with the save below, so episodic memory is built once per
     # question, not twice.
+<<<<<<< HEAD
+=======
+    timings = {
+        "rewrite_ms": None,
+        "episodic_ms": None,
+        "retrieve_ms": None,
+        "retrieve_calls": 0,
+        "generate_ms": None,
+        "total_ms": None,
+    }
+>>>>>>> origin/main
     episodic_context = ""
+    _t0 = time.perf_counter()
     try:
         _episodic = get_cached_episodic_memory(settings)
         _episodes = _episodic.search(question, k=3)
@@ -367,13 +560,27 @@ def _ask_impl(
             episodic_context = format_episodic(_episodes)
     except Exception:
         pass
+    finally:
+        timings["episodic_ms"] = (time.perf_counter() - _t0) * 1000
+    _t0 = time.perf_counter()
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
         else question
     )
+    if settings.rewrite_enabled and history:
+        timings["rewrite_ms"] = (time.perf_counter() - _t0) * 1000
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
+<<<<<<< HEAD
+=======
+    # Whether this question built a fresh retriever (cache reload) or
+    # reused the cached one (hit). Snapshot the key before build_chain
+    # rebinds the name; an explicitly passed retriever is neither.
+    cache_reload = retriever is None and (
+        caching._retriever_key(settings) not in caching._RETRIEVERS
+    )
+>>>>>>> origin/main
     # `capture` collects the hits generation retrieves, so the answer
     # reuses them for citations instead of searching a second time.
     capture: dict = {}
@@ -383,6 +590,7 @@ def _ask_impl(
         user_groups=user_groups,
         episodic_context=episodic_context,
         document_id=document_id,
+<<<<<<< HEAD
         capture=capture,
     )
     text = chain.invoke(standalone, config=tracing.run_config(run_name="generate"))
@@ -392,6 +600,41 @@ def _ask_impl(
     if settings.hybrid_fallback and is_abstention(text):
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
+=======
+        timings=timings,
+        capture=capture,
+    )
+    try:
+        text = _invoke_chain(
+            chain, standalone, settings, config=tracing.run_config(run_name="generate")
+        )
+        text = strip_think(text)
+        # Server-side hybrid fallback: if the model abstained but hybrid is on,
+        # answer from general knowledge instead of showing "No relevant answer".
+        if settings.hybrid_fallback and is_abstention(text):
+            text = general_knowledge_answer(standalone, llm, settings)
+    except Exception as e:
+        # No behavior change: the error still propagates to the caller
+        # (the API returns 500 as before). It is only counted and logged.
+        record_llm_error(e)
+        log_error_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            where="generate",
+            error_type=type(e).__name__,
+            error=str(e),
+            model=model,
+        )
+        raise
+    latency_ms = (time.perf_counter() - started) * 1000
+    # generate_ms is chain time minus retrieval, so it includes prompt
+    # formatting and retriever construction: an approximation, not a
+    # pure LLM timer (see observability.log_question_event).
+    timings["generate_ms"] = max(
+        latency_ms - (timings.get("retrieve_ms") or 0.0), 0.0
+    )
+    timings["total_ms"] = latency_ms
+>>>>>>> origin/main
     # Citations reuse the hits generation already retrieved (see
     # _generation_hits): no second search. Traced as its own span so the
     # reuse is visible in the trace.
@@ -408,6 +651,21 @@ def _ask_impl(
         weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
+    record_question(timings, streamed=False)
+    log_question_event(
+        request_id=request_id,
+        endpoint=endpoint,
+        model=model,
+        question=question,
+        timings=timings,
+        hits=len(hits),
+        sources=sources,
+        grounded=answer.grounded,
+        weak_evidence=answer.weak_evidence,
+        standalone=answer.standalone_question is not None,
+        streamed=False,
+        cache_reload=cache_reload,
+    )
     # Save to episodic memory for long-term recall (skip if it was a fallback
     # to avoid polluting memory with "I don't know" responses). Same
     # cached instance as the search above.
@@ -426,9 +684,12 @@ def stream_ask(
     user_groups: list[str] | None = None,
     retriever: Retriever | None = None,
     document_id: str | None = None,
+    request_id: str | None = None,
+    endpoint: str | None = None,
 ):
     """Streaming variant of ask(). Yields {"token": str} chunks as the LLM
     generates, then a final {"answer": Answer}. Powers st.write_stream.
+<<<<<<< HEAD
 
     Opens one Langfuse trace per question (a no-op when tracing is off).
     The trace stays open until the stream is exhausted or the client
@@ -458,13 +719,87 @@ def _stream_ask_impl(
     document_id: str | None = None,
 ):
     import time
+=======
+    request_id/endpoint are carried into the structured log line (see ask).
+>>>>>>> origin/main
 
+    Opens one Langfuse trace per question (a no-op when tracing is off).
+    The trace stays open until the stream is exhausted or the client
+    disconnects.
+    """
+    settings = settings or get_settings()
+    metadata = {"model": settings.ollama_model}
+    if document_id:
+        metadata["document_id"] = document_id
+    with tracing.question_span(question, metadata=metadata):
+        yield from _stream_ask_impl(
+            question,
+            settings=settings,
+            history=history,
+            user_groups=user_groups,
+            retriever=retriever,
+            document_id=document_id,
+            request_id=request_id,
+            endpoint=endpoint,
+        )
+
+
+def _stream_ask_impl(
+    question: str,
+    settings: Settings | None = None,
+    history: list[tuple[str, str]] | None = None,
+    user_groups: list[str] | None = None,
+    retriever: Retriever | None = None,
+    document_id: str | None = None,
+    request_id: str | None = None,
+    endpoint: str | None = None,
+):
+    import time
     settings = settings or get_settings()
     history = history or []
+    request_id = request_id or new_request_id()
+    model = _model_name(settings)
     llm = get_llm(settings)
     # Small talk bypasses retrieval entirely.
     if is_small_talk(question):
-        text = small_talk_answer(question, llm)
+        _t0 = time.perf_counter()
+        try:
+            text = small_talk_answer(question, llm, settings)
+        except Exception as e:
+            record_llm_error(e)
+            log_error_event(
+                request_id=request_id,
+                endpoint=endpoint,
+                where="generate",
+                error_type=type(e).__name__,
+                error=str(e),
+                model=model,
+            )
+            raise
+        _ms = (time.perf_counter() - _t0) * 1000
+        timings: dict = {
+            "rewrite_ms": None,
+            "episodic_ms": None,
+            "retrieve_ms": None,
+            "retrieve_calls": 0,
+            "generate_ms": _ms,
+            "total_ms": _ms,
+        }
+        record_question(timings, streamed=True)
+        log_question_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            model=model,
+            question=question,
+            timings=timings,
+            hits=0,
+            sources=[],
+            grounded=True,
+            weak_evidence=False,
+            standalone=False,
+            streamed=True,
+            cache_reload=False,
+        )
         yield {"token": text}
         yield {
             "answer": Answer(
@@ -480,7 +815,19 @@ def _stream_ask_impl(
     # Episodic memory: supplementary context only — never merged into
     # history, so it can't hijack the query rewrite (see ask()).
     # Cached instance, shared with the save below: built once.
+<<<<<<< HEAD
+=======
+    timings = {
+        "rewrite_ms": None,
+        "episodic_ms": None,
+        "retrieve_ms": None,
+        "retrieve_calls": 0,
+        "generate_ms": None,
+        "total_ms": None,
+    }
+>>>>>>> origin/main
     episodic_context = ""
+    _t0 = time.perf_counter()
     try:
         _episodic = get_cached_episodic_memory(settings)
         _episodes = _episodic.search(question, k=3)
@@ -488,13 +835,27 @@ def _stream_ask_impl(
             episodic_context = format_episodic(_episodes)
     except Exception:
         pass
+    finally:
+        timings["episodic_ms"] = (time.perf_counter() - _t0) * 1000
+    _t0 = time.perf_counter()
     standalone = (
         rewrite_query(question, history, llm)
         if settings.rewrite_enabled and history
         else question
     )
+    if settings.rewrite_enabled and history:
+        timings["rewrite_ms"] = (time.perf_counter() - _t0) * 1000
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
+<<<<<<< HEAD
+=======
+    # Whether this question built a fresh retriever (cache reload) or
+    # reused the cached one (hit). Snapshot the key before build_chain
+    # rebinds the name; an explicitly passed retriever is neither.
+    cache_reload = retriever is None and (
+        caching._retriever_key(settings) not in caching._RETRIEVERS
+    )
+>>>>>>> origin/main
     # `capture` collects the hits generation retrieves, so the answer
     # reuses them for citations instead of searching a second time.
     capture: dict = {}
@@ -504,6 +865,10 @@ def _stream_ask_impl(
         user_groups=user_groups,
         episodic_context=episodic_context,
         document_id=document_id,
+<<<<<<< HEAD
+=======
+        timings=timings,
+>>>>>>> origin/main
         capture=capture,
     )
     parts: list[str] = []
@@ -515,8 +880,20 @@ def _stream_ask_impl(
     head_text = ""
     abstention_detected = False
     HEAD_CHECK_LEN = 200
+    stream_iter = None
     try:
+<<<<<<< HEAD
         for chunk in chain.stream(standalone, config=tracing.run_config(run_name="generate")):
+=======
+        stream_iter = chain.stream(
+            standalone, config=tracing.run_config(run_name="generate")
+        )
+        for chunk in iter_with_idle_timeout(
+            stream_iter,
+            settings.stream_idle_timeout_seconds,
+            label="chat-stream",
+        ):
+>>>>>>> origin/main
             parts.append(chunk)
             visible = think_filter.feed(chunk)
             if not visible:
@@ -539,18 +916,61 @@ def _stream_ask_impl(
                         head_buf = []
             else:
                 yield {"token": visible}
-    except Exception:
+    except OllamaTimeoutError:
+        # A stalled stream must fail fast, not burn a second full
+        # generation on the one-shot fallback.
+        raise
+    except Exception as e:
         # Streaming not supported by this LLM — fall back to one shot.
+<<<<<<< HEAD
         text = chain.invoke(standalone, config=tracing.run_config(run_name="generate"))
+=======
+        # Counted once here; if the one-shot retry also fails, it is
+        # counted again and the error propagates (same as before).
+        record_llm_error(e)
+        log_error_event(
+            request_id=request_id,
+            endpoint=endpoint,
+            where="stream",
+            error_type=type(e).__name__,
+            error=str(e),
+            model=model,
+        )
+        try:
+            text = _invoke_chain(
+                chain, standalone, settings, config=tracing.run_config(run_name="generate")
+            )
+        except Exception as e2:
+            record_llm_error(e2)
+            log_error_event(
+                request_id=request_id,
+                endpoint=endpoint,
+                where="generate",
+                error_type=type(e2).__name__,
+                error=str(e2),
+                model=model,
+            )
+            raise
+>>>>>>> origin/main
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]
+    finally:
+        # Release the model call as soon as the stream ends, errors, or is
+        # abandoned. Abandonment is the disconnect path: the API closes
+        # this generator, GeneratorExit lands at the yield above, and
+        # closing the chain iterator closes the underlying Ollama HTTP
+        # stream instead of letting generation run on for nobody.
+        if stream_iter is not None:
+            close = getattr(stream_iter, "close", None)
+            if close is not None:
+                close()
     text = strip_think("".join(parts))
     text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
     # in the one-shot path), stream a general-knowledge answer instead.
     if settings.hybrid_fallback and (abstention_detected or is_abstention(text)):
-        fb_text = general_knowledge_answer(standalone, llm)
+        fb_text = general_knowledge_answer(standalone, llm, settings)
         for i in range(0, len(fb_text), 50):
             yield {"token": fb_text[i : i + 50]}
         text = fb_text
@@ -565,6 +985,13 @@ def _stream_ask_impl(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
+<<<<<<< HEAD
+=======
+    timings["generate_ms"] = max(
+        latency_ms - (timings.get("retrieve_ms") or 0.0), 0.0
+    )
+    timings["total_ms"] = latency_ms
+>>>>>>> origin/main
     # Citations reuse the hits generation already retrieved (see
     # _generation_hits): no second search. Traced as its own span so the
     # reuse is visible in the trace.
@@ -580,6 +1007,24 @@ def _stream_ask_impl(
         weak_evidence=_weak_evidence(retriever),
     )
     log_question(settings, question, answer, latency_ms)
+<<<<<<< HEAD
+=======
+    record_question(timings, streamed=True)
+    log_question_event(
+        request_id=request_id,
+        endpoint=endpoint,
+        model=model,
+        question=question,
+        timings=timings,
+        hits=len(hits),
+        sources=answer.sources,
+        grounded=answer.grounded,
+        weak_evidence=answer.weak_evidence,
+        standalone=answer.standalone_question is not None,
+        streamed=True,
+        cache_reload=cache_reload,
+    )
+>>>>>>> origin/main
     # Save to episodic memory (skip ungrounded fallbacks). Same cached
     # instance as the search above.
     if answer.grounded:

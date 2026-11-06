@@ -9,8 +9,11 @@ Endpoints:
   POST /api/chat         non-streaming ask (optional document_id to scope
                          retrieval, optional conversation_id for persistence)
   POST /api/chat/stream  SSE streaming (token events, then done)
-  GET  /api/health       ollama reachability + index presence
+  GET  /api/health       ollama reachability + index presence +
+                         Ollama queue snapshot (in-flight calls, waits,
+                         timeouts, retries)
   GET  /api/config       safe settings subset (no secrets)
+  GET  /api/metrics      in-memory counters + latency summaries (no new dep)
   POST /api/feedback     thumbs up/down vote (persisted via audit.log_feedback)
   POST /api/upload       upload one or more documents into the PERSISTENT
                          FAISS index (repeated "file" field)
@@ -32,14 +35,16 @@ is unset or empty, all endpoints are open (local dev).
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+import logging
 import os
 import uuid
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi import status as http_status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -49,7 +54,29 @@ from .audit import log_feedback
 from .caching import clear_cache
 from .chain import Answer, ask, stream_ask
 from .config import get_embeddings, get_settings
+from .ollama_guard import (
+    OllamaTimeoutError,
+    is_transient_error,
+    iter_with_idle_timeout,
+    ollama_snapshot,
+    run_with_timeout,
+)
 from . import conversations as conv_store
+from .observability import (
+    FILENAME_PREVIEW_CHARS,
+    get_metrics_snapshot,
+    log_error_event,
+    log_event,
+    log_summarize_event,
+    log_upload_event,
+    new_request_id,
+    record_summarize,
+    record_upload,
+    truncate_preview,
+)
+from .summarize import SINGLE_CALL_CHARS
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sidekick RAG API")
 
@@ -111,6 +138,135 @@ def _answer_to_wire(a: Answer) -> dict:
     }
 
 
+# --- Cancel-on-disconnect for the streaming endpoints ---------------------
+#
+# The two SSE endpoints below drive their producer (stream_ask /
+# summarize_events) one item at a time in a worker thread while a small
+# watcher task probes request.is_disconnected(). When the client goes
+# away mid-generation the driver closes the producer iterator: that
+# raises GeneratorExit inside the producer, whose finally closes the
+# underlying chain stream, which closes the Ollama HTTP stream, so the
+# model stops generating instead of finishing tokens nobody reads.
+# The SSE contract for connected clients is unchanged: same events, same
+# order, same error events. A disconnect ends the stream quietly (no
+# error event, no 500): there is nobody left to tell.
+#
+# The endpoints are async for exactly this reason: is_disconnected() is
+# a coroutine, and the sync producers must run off the event loop so the
+# watcher can run while a token is in flight.
+
+_DISCONNECT_POLL_SECONDS = 0.2
+_DISCONNECT_GRACE_SECONDS = 5.0
+
+
+def _pull(iterator):
+    """One pull from a sync iterator, for a worker thread.
+
+    Returns (True, item), or (False, None) at exhaustion. Producer
+    errors propagate to the caller.
+    """
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None
+
+
+def _close_iterator(iterator) -> None:
+    """Close a producer iterator, best effort.
+
+    Closing raises GeneratorExit inside the producer so it can release
+    its model call. A ValueError means the producer is still executing
+    in another thread (a token pull is in flight); the iterator is
+    reaped when that pull lands, so there is nothing more to do here.
+    """
+    close = getattr(iterator, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except ValueError:
+        pass
+
+
+async def _watch_disconnect(request: Request) -> bool:
+    """Return True when the client disconnects; never raises.
+
+    Probes request.is_disconnected() until it says True. Starlette's
+    probe waits for the next ASGI message, which only arrives on
+    disconnect, so one probe usually blocks until then; if a server
+    answers False at once instead, sleep briefly and probe again.
+    A probe that errors is logged once and treated as still connected,
+    so a broken probe can never kill a healthy stream.
+    """
+    logged = False
+    while True:
+        try:
+            if await request.is_disconnected():
+                return True
+        except Exception:
+            if not logged:
+                logger.warning(
+                    "disconnect probe failed; assuming client still connected",
+                    exc_info=True,
+                )
+                logged = True
+        await asyncio.sleep(_DISCONNECT_POLL_SECONDS)
+
+
+async def _drive_stream(iterator, request: Request, *, label: str):
+    """Yield items from a sync producer iterator, stopping on disconnect.
+
+    Each pull runs in a worker thread so the event loop stays free to
+    notice the disconnect while a token is in flight. On disconnect the
+    producer is closed (see _close_iterator), one log line is written,
+    and iteration ends with no error event: the client is gone. Producer
+    errors pass through unchanged, so the existing error handling in the
+    caller still applies.
+    """
+    watcher = asyncio.ensure_future(_watch_disconnect(request))
+    yielded = 0
+    try:
+        loop = asyncio.get_running_loop()
+        while True:
+            pull = asyncio.ensure_future(
+                loop.run_in_executor(None, _pull, iterator)
+            )
+            done, _pending = await asyncio.wait(
+                {pull, watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if watcher in done:
+                # The client left mid-generation. Wait briefly for the
+                # in-flight pull to land so the producer is suspended
+                # and close() can run; if it is still stuck, close()
+                # is a no-op and the producer is reaped when the pull
+                # lands (bounded by the stream idle timeout).
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(pull), timeout=_DISCONNECT_GRACE_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                _close_iterator(iterator)
+                logger.info(
+                    "client disconnected; cancelled %s stream after %d events",
+                    label,
+                    yielded,
+                )
+                return
+            try:
+                has_item, item = pull.result()
+            except BaseException:
+                _close_iterator(iterator)
+                raise
+            if not has_item:
+                return
+            yielded += 1
+            yield item
+    finally:
+        if not watcher.done():
+            watcher.cancel()
+
+
 class ChatRequest(BaseModel):
     question: str
     history: list[tuple[str, str]] | None = None
@@ -140,6 +296,7 @@ def _document_exists(doc_id: str | None) -> str | None:
 
 @app.post("/api/chat", dependencies=_auth)
 def chat(req: ChatRequest) -> dict:
+    request_id = new_request_id()
     conv_id = req.conversation_id
     if conv_id and conv_store.conversation_exists(conv_id):
         conv_store.add_message(conv_id, "user", req.question)
@@ -147,11 +304,37 @@ def chat(req: ChatRequest) -> dict:
     else:
         conv_id = None
         new_title = None
-    answer = ask(
-        req.question,
-        history=req.history or [],
-        document_id=_document_exists(req.document_id),
-    )
+    # LLM failures are counted and logged inside ask(); they still
+    # propagate as 500s, exactly as before.
+    # Request deadline (settings.chat_timeout_seconds, 330s by default):
+    # a hung Ollama call fails fast with 504 instead of hanging the
+    # request. Transient Ollama errors surface as 502 once the bounded
+    # retries inside the chain are exhausted.
+    settings = get_settings()
+    try:
+        answer = run_with_timeout(
+            lambda: ask(
+                req.question,
+                history=req.history or [],
+                document_id=_document_exists(req.document_id),
+                request_id=request_id,
+                endpoint="/api/chat",
+            ),
+            settings.chat_timeout_seconds,
+            label="chat",
+        )
+    except OllamaTimeoutError:
+        raise HTTPException(
+            status_code=http_status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="The model took too long to answer. Try again in a moment.",
+        )
+    except Exception as e:
+        if is_transient_error(e):
+            raise HTTPException(
+                status_code=http_status.HTTP_502_BAD_GATEWAY,
+                detail="Ollama is unreachable right now. Try again in a moment.",
+            )
+        raise
     if conv_id:
         conv_store.add_message(
             conv_id,
@@ -169,7 +352,8 @@ def chat(req: ChatRequest) -> dict:
 
 
 @app.post("/api/chat/stream", dependencies=_auth)
-def chat_stream(req: ChatRequest) -> StreamingResponse:
+async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
+    request_id = new_request_id()
     doc_id = _document_exists(req.document_id)
     conv_id = (
         req.conversation_id
@@ -182,19 +366,58 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     else:
         new_title = None
 
-    def events():
+    async def events():
         final_answer: Answer | None = None
-        for event in stream_ask(
-            req.question, history=req.history or [], document_id=doc_id
-        ):
-            if "token" in event:
-                yield f"data: {json.dumps({'token': event['token']})}\n\n"
-            else:
-                final_answer = event["answer"]
-                payload = {"done": _answer_to_wire(final_answer)}
-                if new_title:
-                    payload["done"]["conversation_title"] = new_title
-                yield f"data: {json.dumps(payload)}\n\n"
+        try:
+            async for event in _drive_stream(
+                stream_ask(
+                    req.question,
+                    history=req.history or [],
+                    document_id=doc_id,
+                    request_id=request_id,
+                    endpoint="/api/chat/stream",
+                ),
+                request,
+                label="chat",
+            ):
+                if "token" in event:
+                    yield f"data: {json.dumps({'token': event['token']})}\n\n"
+                else:
+                    final_answer = event["answer"]
+                    payload = {"done": _answer_to_wire(final_answer)}
+                    if new_title:
+                        payload["done"]["conversation_title"] = new_title
+                    yield f"data: {json.dumps(payload)}\n\n"
+        except OllamaTimeoutError:
+            # Stalled stream: end with a plain error event instead of
+            # leaving the SSE connection open forever.
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "error": "The model took too long to respond. "
+                        "Try again in a moment.",
+                    }
+                )
+                + "\n\n"
+            )
+            return
+        except Exception as e:
+            if is_transient_error(e):
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "error",
+                            "error": "Ollama is unreachable right now. "
+                            "Try again in a moment.",
+                        }
+                    )
+                    + "\n\n"
+                )
+                return
+            raise
         if conv_id and final_answer is not None:
             conv_store.add_message(
                 conv_id,
@@ -270,6 +493,9 @@ def health() -> dict:
         "status": "ok" if ollama_ok else "degraded",
         "ollama_reachable": ollama_ok,
         "index_present": index_dir.exists(),
+        # Queue visibility: in-flight calls, waits, timeouts, retries.
+        # A backed-up Ollama shows up here without opening the logs.
+        "ollama": ollama_snapshot(),
     }
 
 
@@ -283,6 +509,16 @@ def config() -> dict:
         "rerank": settings.rerank_enabled,
         "hybrid_fallback": settings.hybrid_fallback,
     }
+
+
+@app.get("/api/metrics", dependencies=_auth)
+def metrics() -> dict:
+    """In-memory counters and latency summaries (see observability.py).
+    No new dependency, no persistence: counts reset on restart. The
+    cache section reports hits/reloads when the caching module exposes
+    cache_stats(); until then it reports the chain call-site counters
+    and available=False."""
+    return get_metrics_snapshot()
 
 
 @app.post("/api/feedback", dependencies=_auth)
@@ -312,24 +548,61 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
     endpoint) so tests can patch rag_demo.extract / rag_demo.ocr.
     """
     import json as _json
+    import time as _time
 
     from langchain_community.vectorstores import FAISS
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     from .extract import UnsupportedFormat, extract_text_with_meta, verify_magic_bytes
 
+<<<<<<< HEAD
+=======
+    request_id = new_request_id()
+    _started = _time.perf_counter()
+    _filename = file.filename or "upload"
+
+    def _fail(error: str) -> dict:
+        # No behavior change: same error body as before, only counted
+        # and logged (filename only, never file content).
+        record_upload((_time.perf_counter() - _started) * 1000, ok=False)
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/upload",
+            where="upload",
+            error_type="UploadError",
+            error=error,
+            filename=truncate_preview(_filename, FILENAME_PREVIEW_CHARS),
+        )
+        return {"ok": False, "error": error}
+
+    settings = get_settings()
+    max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
+    data = await file.read()
+>>>>>>> origin/main
     if len(data) > max_mb * 1024 * 1024:
-        return {"ok": False, "error": f"File too large (over {max_mb:.0f} MB)."}
+        return _fail(f"File too large (over {max_mb:.0f} MB).")
     try:
+<<<<<<< HEAD
         if not verify_magic_bytes(filename, data):
             return {"ok": False, "error": "File content doesn't match its extension."}
         text, extractor = extract_text_with_meta(filename, data)
+=======
+        if not verify_magic_bytes(file.filename or "upload", data):
+            return _fail("File content doesn't match its extension.")
+        text, extractor = extract_text_with_meta(file.filename or "upload", data)
+>>>>>>> origin/main
     except UnsupportedFormat as e:
-        return {"ok": False, "error": str(e)}
+        return _fail(str(e))
     except Exception as e:
+<<<<<<< HEAD
         return {"ok": False, "error": f"Couldn't read {filename}: {e}"}
     if not text.strip() and filename.lower().endswith(".pdf"):
         # Scanned PDF with no embedded text: fall back to OCR, mirroring
+=======
+        return _fail(f"Couldn't read {file.filename}: {e}")
+    if not text.strip() and (file.filename or "").lower().endswith(".pdf"):
+        # Scanned PDF with no embedded text — fall back to OCR, mirroring
+>>>>>>> origin/main
         # the old Streamlit app. ocr.py is imported lazily so nothing breaks
         # when the tesseract/poppler binaries are absent.
         from .ocr import INSTALL_HINT, ocr_available, ocr_pdf
@@ -338,6 +611,7 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             try:
                 text = ocr_pdf(data)
             except RuntimeError as e:
+<<<<<<< HEAD
                 return {
                     "ok": False,
                     "error": f"No text found in {filename} (scanned PDF). {e}",
@@ -353,6 +627,19 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             }
     if not text.strip():
         return {"ok": False, "error": f"No text found in {filename}."}
+=======
+                return _fail(
+                    f"No text found in {file.filename} (scanned PDF). {e}"
+                )
+            if text.strip():
+                extractor = "ocr"
+        else:
+            return _fail(
+                f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
+            )
+    if not text.strip():
+        return _fail(f"No text found in {file.filename}.")
+>>>>>>> origin/main
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
@@ -400,6 +687,21 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         extractor,
     )
     _upload_texts[doc_id] = text
+<<<<<<< HEAD
+=======
+    _latency_ms = (_time.perf_counter() - _started) * 1000
+    record_upload(_latency_ms, ok=True)
+    log_upload_event(
+        request_id=request_id,
+        doc_id=doc_id,
+        filename=_filename,
+        chunks=len(chunks),
+        chars=len(text),
+        size_bytes=len(data),
+        extractor=extractor,
+        latency_ms=_latency_ms,
+    )
+>>>>>>> origin/main
     # The on-disk index changed, so the cached retriever would keep
     # serving the old vectors. Drop it; the next question reloads.
     # (Caching contract, see caching.py.)
@@ -491,11 +793,31 @@ def get_document(doc_id: str) -> dict:
 @app.post("/api/documents/{doc_id}/summarize", dependencies=_auth)
 def summarize_document(doc_id: str) -> dict:
     """(Re)generate the LLM summary for a document and cache it in SQLite."""
+    import time as _time
+
+    request_id = new_request_id()
+    _started = _time.perf_counter()
     doc = conv_store.get_document(doc_id)
     if not doc:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize",
+            where="summarize",
+            error_type="NotFound",
+            error="Document not found.",
+            doc_id=doc_id,
+        )
         return {"ok": False, "error": "Document not found."}
     text = _upload_texts.get(doc_id)
     if not text:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize",
+            where="summarize",
+            error_type="NotFound",
+            error="Document text no longer in memory (restarted since upload).",
+            doc_id=doc_id,
+        )
         return {
             "ok": False,
             "error": "Document text no longer in memory (restarted since upload)."
@@ -503,17 +825,46 @@ def summarize_document(doc_id: str) -> dict:
         }
     from .summarize import summarize
 
+    settings = get_settings()
     try:
-        summary = summarize(text, get_settings())
+        summary = run_with_timeout(
+            lambda: summarize(text, settings),
+            settings.summarize_request_timeout_seconds,
+            label="summarize",
+        )
+    except OllamaTimeoutError:
+        return {
+            "ok": False,
+            "error": "Summarization timed out. Try again with a shorter document.",
+        }
     except Exception as e:
+        _latency_ms = (_time.perf_counter() - _started) * 1000
+        record_summarize(_latency_ms, ok=False)
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize",
+            where="summarize",
+            error_type=type(e).__name__,
+            error=str(e),
+            doc_id=doc_id,
+        )
         return {"ok": False, "error": f"Summarize failed: {type(e).__name__}: {e}"}
     summary = summary or "Summary returned empty."
     conv_store.set_document_summary(doc_id, summary)
+    _latency_ms = (_time.perf_counter() - _started) * 1000
+    record_summarize(_latency_ms, ok=True)
+    log_summarize_event(
+        request_id=request_id,
+        doc_id=doc_id,
+        mode="single" if len(text) <= SINGLE_CALL_CHARS else "map_reduce",
+        chars=len(text),
+        latency_ms=_latency_ms,
+    )
     return {"ok": True, "summary": summary}
 
 
 @app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_auth)
-def summarize_document_stream(doc_id: str) -> StreamingResponse:
+async def summarize_document_stream(doc_id: str, request: Request) -> StreamingResponse:
     """SSE stream of summarize progress events, then a done event.
 
     Event payloads (see rag_demo.summarize.summarize_events):
@@ -523,31 +874,97 @@ def summarize_document_stream(doc_id: str) -> StreamingResponse:
       {"type": "done", "summary": "..."}
       {"type": "error", "error": "..."}
     The final summary is cached in SQLite exactly like the sync endpoint.
+    If the client disconnects mid-summary, generation is cancelled (see
+    _drive_stream) and nothing is cached: no partial summary is stored.
     """
+    import time as _time
+
+    request_id = new_request_id()
+    _started = _time.perf_counter()
 
     def _error_event(message: str):
         yield f"data: {json.dumps({'type': 'error', 'error': message})}\n\n"
 
     doc = conv_store.get_document(doc_id)
     if not doc:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize/stream",
+            where="summarize",
+            error_type="NotFound",
+            error="Document not found.",
+            doc_id=doc_id,
+        )
         return StreamingResponse(_error_event("Document not found."),
                                  media_type="text/event-stream")
     text = _upload_texts.get(doc_id)
     if not text:
+        log_error_event(
+            request_id=request_id,
+            endpoint="/api/documents/{id}/summarize/stream",
+            where="summarize",
+            error_type="NotFound",
+            error="Document text no longer in memory (restarted since upload).",
+            doc_id=doc_id,
+        )
         return StreamingResponse(
             _error_event("Document text no longer in memory (restarted since upload)."
                          " Re-upload to summarize."),
             media_type="text/event-stream",
         )
 
-    def events():
+    async def events():
         from .summarize import summarize_events
 
+        settings = get_settings()
         final: str | None = None
-        for event in summarize_events(text, get_settings()):
-            if event["type"] == "done":
-                final = event["summary"]
-            yield f"data: {json.dumps(event)}\n\n"
+        mode = "single" if len(text) <= SINGLE_CALL_CHARS else "map_reduce"
+        try:
+            async for event in _drive_stream(
+                iter_with_idle_timeout(
+                    summarize_events(text, settings),
+                    settings.stream_idle_timeout_seconds,
+                    label="summarize-stream",
+                ),
+                request,
+                label="summarize",
+            ):
+                if event["type"] == "done":
+                    final = event["summary"]
+                    _latency_ms = (_time.perf_counter() - _started) * 1000
+                    record_summarize(_latency_ms, ok=True)
+                    log_summarize_event(
+                        request_id=request_id,
+                        doc_id=doc_id,
+                        mode=mode,
+                        chars=len(text),
+                        latency_ms=_latency_ms,
+                    )
+                elif event["type"] == "error":
+                    _latency_ms = (_time.perf_counter() - _started) * 1000
+                    record_summarize(_latency_ms, ok=False)
+                    log_error_event(
+                        request_id=request_id,
+                        endpoint="/api/documents/{id}/summarize/stream",
+                        where="summarize",
+                        error_type="SummarizeError",
+                        error=event.get("error", ""),
+                        doc_id=doc_id,
+                    )
+                yield f"data: {json.dumps(event)}\n\n"
+        except OllamaTimeoutError:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "error": "Summarization stalled: the model produced "
+                        "no output for a while. Try again in a moment.",
+                    }
+                )
+                + "\n\n"
+            )
+            return
         if final:
             conv_store.set_document_summary(doc_id, final)
 
@@ -564,6 +981,14 @@ def delete_document(doc_id: str) -> dict:
 
     doc = conv_store.delete_document(doc_id)
     if not doc:
+        log_error_event(
+            request_id=new_request_id(),
+            endpoint="/api/documents/{id}",
+            where="delete_document",
+            error_type="NotFound",
+            error="Document not found.",
+            doc_id=doc_id,
+        )
         return {"ok": False, "error": "Document not found."}
     source_name = f"upload:{doc_id}"
     settings = get_settings()
@@ -595,6 +1020,14 @@ def delete_document(doc_id: str) -> dict:
         # If nothing remains, leave the (now empty) index files as-is;
         # the next upload will recreate the index.
     _upload_texts.pop(doc_id, None)
+<<<<<<< HEAD
+=======
+    log_event(
+        "document_delete",
+        request_id=new_request_id(),
+        doc_id=doc_id,
+    )
+>>>>>>> origin/main
     # chunks.json / the FAISS index changed on disk; drop the cached
     # retriever so the next question sees the deletion.
     clear_cache()
