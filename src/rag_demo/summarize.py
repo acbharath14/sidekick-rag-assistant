@@ -196,15 +196,20 @@ def summarize_events(text: str, settings: Settings | None = None):
     """
     try:
         settings = settings or get_settings()
+        # Tests pass a bare object() as settings, so read through getattr
+        # with the Settings defaults; a real Settings always has these.
+        timeout = getattr(settings, "summarize_timeout_seconds", 600.0)
+        attempts = getattr(settings, "llm_retry_attempts", RETRY_ATTEMPTS)
+        backoff = getattr(settings, "llm_retry_backoff_seconds", RETRY_BACKOFF_SECONDS)
         llm = get_llm(settings)
         if len(text) <= SINGLE_CALL_CHARS:
             yield {"type": "start", "mode": "single", "total": 1}
             result, _ = _invoke_with_retry(
                 llm,
                 SUMMARY_PROMPT.format(text=text),
-                settings.summarize_timeout_seconds,
-                settings.llm_retry_attempts,
-                settings.llm_retry_backoff_seconds,
+                timeout,
+                attempts,
+                backoff,
                 run_name="summarize-single",
             )
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
@@ -222,9 +227,9 @@ def summarize_events(text: str, settings: Settings | None = None):
             p, _ = _invoke_with_retry(
                 llm,
                 MAP_PROMPT.format(chunk=c),
-                settings.summarize_timeout_seconds,
-                settings.llm_retry_attempts,
-                settings.llm_retry_backoff_seconds,
+                timeout,
+                attempts,
+                backoff,
                 run_name="summarize-map",
             )
             if p:
@@ -239,9 +244,9 @@ def summarize_events(text: str, settings: Settings | None = None):
         summary = _reduce_summaries(
             partials,
             llm,
-            settings.summarize_timeout_seconds,
-            settings.llm_retry_attempts,
-            settings.llm_retry_backoff_seconds,
+            timeout,
+            attempts,
+            backoff,
         )
         if not summary:
             summary = "Summary didn't complete — the model may be overloaded. Try again."
