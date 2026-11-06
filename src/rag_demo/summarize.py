@@ -17,16 +17,26 @@ to `timeout` seconds. It goes straight to the raw fallback instead.
 Streaming: `summarize_events` yields progress events for SSE consumers
 (start / progress / done / error). `summarize` is a thin wrapper that runs
 the same generator to completion, so both paths share one code path.
+
+Timeouts and retries go through rag_demo.ollama_guard and Settings:
+the per-call deadline is settings.summarize_timeout_seconds (600s,
+unchanged), attempts and backoff are settings.llm_retry_attempts and
+settings.llm_retry_backoff_seconds, and every call is recorded in the
+shared Ollama tracker that /api/health exposes.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from . import tracing
 from .config import Settings, get_llm, get_settings
+from .ollama_guard import TRACKER, track_call
+
+logger = logging.getLogger(__name__)
 
 SINGLE_CALL_CHARS = 6000
 CHUNK_CHARS = 4000
@@ -62,10 +72,12 @@ RAW_SECTION_TEMPLATE = (
 
 def _invoke_once(
     llm, prompt: str, timeout: float | None = None, run_name: str | None = None
-) -> tuple[str, str]:
+) -> tuple[str, str, BaseException | None]:
     """Single LLM attempt.
 
-    Returns (text, status) where status is "ok", "timeout", or "error".
+    Returns (text, status, exc) where status is "ok", "timeout", or
+    "error" and exc is the failure when status is "error". The call is
+    recorded in the shared Ollama tracker, like every other LLM call.
     run_name names the Langfuse run when tracing is on (e.g.
     "summarize-single"); None leaves the call untraced.
     """
@@ -85,24 +97,30 @@ def _invoke_once(
         text = out.content if hasattr(out, "content") else str(out)
         return strip_think(text.strip())
 
-    # NOTE: not using a context manager — on timeout we abandon the stuck
-    # thread via shutdown(wait=False) instead of blocking until Ollama
-    # finishes (which is what `with` does and why the UI hung forever).
+    # NOTE: not using a context manager for the executor — on timeout we
+    # abandon the stuck thread via shutdown(wait=False) instead of
+    # blocking until Ollama finishes (which is what `with` does and why
+    # the UI hung forever). The submit happens inside track_call so a
+    # configured concurrency cap actually gates the call.
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = ex.submit(_do)
     try:
-        return future.result(timeout=timeout), "ok"
-    except concurrent.futures.TimeoutError:
-        return "", "timeout"
-    except Exception:
-        return "", "error"
+        with track_call("summarize", acquire_timeout=timeout) as record:
+            future = ex.submit(_do)
+            try:
+                return future.result(timeout=timeout), "ok", None
+            except concurrent.futures.TimeoutError:
+                record.timed_out = True
+                return "", "timeout", None
+            except Exception as e:
+                record.errored = True
+                return "", "error", e
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
 
 
 def _invoke(llm, prompt: str, timeout: float | None = None, run_name: str | None = None) -> str:
     """Invoke the LLM with a timeout; returns '' on timeout/failure."""
-    text, _ = _invoke_once(llm, prompt, timeout, run_name=run_name)
+    text, _, _ = _invoke_once(llm, prompt, timeout, run_name=run_name)
     return text
 
 
@@ -117,33 +135,53 @@ def _invoke_with_retry(
     """Invoke with retries for transient errors.
 
     Only "error" outcomes are retried — timeouts go straight to the caller
-    (see module docstring for why). Returns (text, status).
+    (see module docstring for why). Each retry is logged. Returns
+    (text, status).
     """
-    text, status = _invoke_once(llm, prompt, timeout, run_name=run_name)
+    text, status, exc = _invoke_once(llm, prompt, timeout, run_name=run_name)
+    attempt = 1
     for wait in backoff[: max(0, attempts - 1)]:
         if status != "error":
             break
+        if exc is not None:
+            TRACKER.record_retry("summarize", attempt, attempts, exc)
+        else:
+            logger.warning(
+                "Summarize LLM call failed, retry %d/%d", attempt, attempts
+            )
+        attempt += 1
         time.sleep(wait)
-        text, status = _invoke_once(llm, prompt, timeout, run_name=run_name)
+        text, status, exc = _invoke_once(llm, prompt, timeout, run_name=run_name)
     return text, status
 
 
-def _reduce_summaries(partials: list[str], llm, timeout: float | None = None) -> str:
+def _reduce_summaries(
+    partials: list[str],
+    llm,
+    timeout: float | None = None,
+    attempts: int = RETRY_ATTEMPTS,
+    backoff: tuple[float, ...] = RETRY_BACKOFF_SECONDS,
+) -> str:
     """Combine chunk summaries into one; recurse when the combined input is
     too large for a single comfortable reduce call."""
     combined = "\n\n".join(partials)
     if len(combined) <= REDUCE_LIMIT_CHARS or len(partials) <= 1:
         result, _ = _invoke_with_retry(
-            llm, REDUCE_PROMPT.format(summaries=combined), timeout, run_name="summarize-reduce"
+            llm,
+            REDUCE_PROMPT.format(summaries=combined),
+            timeout,
+            attempts,
+            backoff,
+            run_name="summarize-reduce",
         )
         return result
     mid = len(partials) // 2
-    left = _reduce_summaries(partials[:mid], llm, timeout)
-    right = _reduce_summaries(partials[mid:], llm, timeout)
+    left = _reduce_summaries(partials[:mid], llm, timeout, attempts, backoff)
+    right = _reduce_summaries(partials[mid:], llm, timeout, attempts, backoff)
     merged = [s for s in (left, right) if s]
     if not merged:
         return ""
-    return _reduce_summaries(merged, llm, timeout)
+    return _reduce_summaries(merged, llm, timeout, attempts, backoff)
 
 
 def summarize_events(text: str, settings: Settings | None = None):
@@ -158,11 +196,21 @@ def summarize_events(text: str, settings: Settings | None = None):
     """
     try:
         settings = settings or get_settings()
+        # Tests pass a bare object() as settings, so read through getattr
+        # with the Settings defaults; a real Settings always has these.
+        timeout = getattr(settings, "summarize_timeout_seconds", 600.0)
+        attempts = getattr(settings, "llm_retry_attempts", RETRY_ATTEMPTS)
+        backoff = getattr(settings, "llm_retry_backoff_seconds", RETRY_BACKOFF_SECONDS)
         llm = get_llm(settings)
         if len(text) <= SINGLE_CALL_CHARS:
             yield {"type": "start", "mode": "single", "total": 1}
             result, _ = _invoke_with_retry(
-                llm, SUMMARY_PROMPT.format(text=text), run_name="summarize-single"
+                llm,
+                SUMMARY_PROMPT.format(text=text),
+                timeout,
+                attempts,
+                backoff,
+                run_name="summarize-single",
             )
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
             yield {"type": "done", "summary": summary}
@@ -177,7 +225,12 @@ def summarize_events(text: str, settings: Settings | None = None):
         raw_fallbacks = 0
         for i, c in enumerate(chunks, 1):
             p, _ = _invoke_with_retry(
-                llm, MAP_PROMPT.format(chunk=c), run_name="summarize-map"
+                llm,
+                MAP_PROMPT.format(chunk=c),
+                timeout,
+                attempts,
+                backoff,
+                run_name="summarize-map",
             )
             if p:
                 partials.append(p)
@@ -188,7 +241,13 @@ def summarize_events(text: str, settings: Settings | None = None):
                 raw_fallbacks += 1
             yield {"type": "progress", "done": i, "total": len(chunks), "stage": "map"}
         yield {"type": "progress", "stage": "reduce"}
-        summary = _reduce_summaries(partials, llm)
+        summary = _reduce_summaries(
+            partials,
+            llm,
+            timeout,
+            attempts,
+            backoff,
+        )
         if not summary:
             summary = "Summary didn't complete — the model may be overloaded. Try again."
         elif raw_fallbacks:

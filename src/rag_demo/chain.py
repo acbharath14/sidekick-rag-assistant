@@ -12,6 +12,12 @@ from . import tracing
 from .audit import log_question
 from .caching import get_cached_episodic_memory, get_cached_retriever
 from .config import Settings, get_llm, get_settings
+from .ollama_guard import (
+    OllamaTimeoutError,
+    call_with_timeout_and_retry,
+    invoke_llm,
+    iter_with_idle_timeout,
+)
 from .retriever import Hit, Retriever, format_citation
 from .rewrite import rewrite_query
 
@@ -151,28 +157,48 @@ def is_small_talk(question: str) -> bool:
     return q in SMALL_TALK_PATTERNS
 
 
-def small_talk_answer(question: str, llm) -> str:
+def small_talk_answer(question: str, llm, settings: Settings | None = None) -> str:
     """Brief friendly response without retrieval or citations."""
     prompt = (
         "The user said: \"" + question + "\"\n"
         "Respond briefly and warmly (1-2 sentences). You are Sidekick, "
         "a helpful RAG assistant. Do not mention sources or citations."
     )
-    out = tracing.invoke_llm(llm, prompt, run_name="small-talk")
-    text = out.content if hasattr(out, "content") else str(out)
-    return strip_think(text).strip()
+    # Tracing span wraps the guarded call: the span records the call
+    # timing while the guard owns the invoke (timeout plus retry).
+    with tracing.span("small-talk"):
+        return strip_think(invoke_llm(llm, prompt, settings, label="small-talk").strip())
 
 
-def general_knowledge_answer(question: str, llm) -> str:
+def general_knowledge_answer(question: str, llm, settings: Settings | None = None) -> str:
     """Direct general-knowledge answer, bypassing retrieval."""
     prompt = (
         "Answer the following question from your general knowledge. "
         "Be concise and accurate.\n\nQuestion: " + question
     )
-    out = tracing.invoke_llm(llm, prompt, run_name="general-knowledge")
-    text = out.content if hasattr(out, "content") else str(out)
-    text = strip_think(text)
+    # Tracing span wraps the guarded call (see small_talk_answer).
+    with tracing.span("general-knowledge"):
+        text = strip_think(invoke_llm(llm, prompt, settings, label="general-knowledge"))
     return "🌐 General knowledge (not from your corpus).\n" + text.strip()
+
+
+def _invoke_chain(chain, standalone: str, settings: Settings, config=None) -> str:
+    """One generation call with the shared timeout and retry policy.
+
+    The whole chain (retrieve plus LLM) runs in a worker thread with the
+    model deadline; transient Ollama errors are retried with backoff and
+    timeouts fail fast as OllamaTimeoutError, never retried. Retrying
+    re-runs the local retrieval too, which is cheap (local FAISS/BM25).
+    config carries the Langfuse run config (None when tracing is off);
+    LangChain runnables accept config=None.
+    """
+    return call_with_timeout_and_retry(
+        lambda: chain.invoke(standalone, config=config),
+        timeout=settings.llm_timeout_seconds,
+        attempts=settings.llm_retry_attempts,
+        backoff=settings.llm_retry_backoff_seconds,
+        label="chat",
+    )
 
 
 @dataclass
@@ -343,7 +369,7 @@ def _ask_impl(
     # Small talk bypasses retrieval entirely — no need to search the corpus
     # for "hi".
     if is_small_talk(question):
-        text = small_talk_answer(question, llm)
+        text = small_talk_answer(question, llm, settings)
         return Answer(
             text=text,
             sources=[],
@@ -385,12 +411,14 @@ def _ask_impl(
         document_id=document_id,
         capture=capture,
     )
-    text = chain.invoke(standalone, config=tracing.run_config(run_name="generate"))
+    text = _invoke_chain(
+        chain, standalone, settings, config=tracing.run_config(run_name="generate")
+    )
     text = strip_think(text)
     # Server-side hybrid fallback: if the model abstained but hybrid is on,
     # answer from general knowledge instead of showing "No relevant answer".
     if settings.hybrid_fallback and is_abstention(text):
-        text = general_knowledge_answer(standalone, llm)
+        text = general_knowledge_answer(standalone, llm, settings)
     latency_ms = (time.perf_counter() - started) * 1000
     # Citations reuse the hits generation already retrieved (see
     # _generation_hits): no second search. Traced as its own span so the
@@ -464,7 +492,7 @@ def _stream_ask_impl(
     llm = get_llm(settings)
     # Small talk bypasses retrieval entirely.
     if is_small_talk(question):
-        text = small_talk_answer(question, llm)
+        text = small_talk_answer(question, llm, settings)
         yield {"token": text}
         yield {
             "answer": Answer(
@@ -516,7 +544,11 @@ def _stream_ask_impl(
     abstention_detected = False
     HEAD_CHECK_LEN = 200
     try:
-        for chunk in chain.stream(standalone, config=tracing.run_config(run_name="generate")):
+        for chunk in iter_with_idle_timeout(
+            chain.stream(standalone, config=tracing.run_config(run_name="generate")),
+            settings.stream_idle_timeout_seconds,
+            label="chat-stream",
+        ):
             parts.append(chunk)
             visible = think_filter.feed(chunk)
             if not visible:
@@ -539,9 +571,15 @@ def _stream_ask_impl(
                         head_buf = []
             else:
                 yield {"token": visible}
+    except OllamaTimeoutError:
+        # A stalled stream must fail fast, not burn a second full
+        # generation on the one-shot fallback.
+        raise
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
-        text = chain.invoke(standalone, config=tracing.run_config(run_name="generate"))
+        text = _invoke_chain(
+            chain, standalone, settings, config=tracing.run_config(run_name="generate")
+        )
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]
@@ -550,7 +588,7 @@ def _stream_ask_impl(
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
     # in the one-shot path), stream a general-knowledge answer instead.
     if settings.hybrid_fallback and (abstention_detected or is_abstention(text)):
-        fb_text = general_knowledge_answer(standalone, llm)
+        fb_text = general_knowledge_answer(standalone, llm, settings)
         for i in range(0, len(fb_text), 50):
             yield {"token": fb_text[i : i + 50]}
         text = fb_text

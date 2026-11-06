@@ -39,7 +39,9 @@ def test_health_shape():
     r = client.get("/api/health")
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"status", "ollama_reachable", "index_present"}
+    assert set(body.keys()) == {
+        "status", "ollama_reachable", "index_present", "ollama",
+    }
 
 
 def test_config_no_secrets():
@@ -125,3 +127,69 @@ def test_upload_scanned_pdf_ocr_failure_surfaces_cause():
     body = r.json()
     assert body["ok"] is False
     assert "tesseract" in body["error"]
+
+
+def test_health_reports_ollama_queue():
+    """Health exposes the Ollama queue snapshot, so a backed-up Ollama
+    is observable from outside the process."""
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    ollama = r.json()["ollama"]
+    for key in (
+        "in_flight",
+        "max_in_flight",
+        "calls_total",
+        "timeouts_total",
+        "retries_total",
+        "errors_total",
+        "queued_behind_total",
+        "waits_total",
+        "max_call_seconds",
+    ):
+        assert key in ollama, f"missing queue key: {key}"
+    assert ollama["in_flight"] == 0
+
+
+def test_chat_timeout_returns_504(monkeypatch):
+    """A hung model fails fast with 504 and a plain message."""
+    import time
+
+    import rag_demo.api as api_mod
+
+    def _slow(question, history=None, document_id=None):
+        time.sleep(2)
+        return None
+
+    monkeypatch.setattr(api_mod, "ask", _slow)
+    monkeypatch.setenv("RAG_DEMO_CHAT_TIMEOUT", "0.05")
+    r = client.post("/api/chat", json={"question": "What is this?"})
+    assert r.status_code == 504
+    assert "took too long" in r.json()["detail"]
+
+
+def test_chat_transient_failure_returns_502(monkeypatch):
+    """Ollama down after retries surfaces as 502, not a bare 500."""
+    import rag_demo.api as api_mod
+
+    def _down(question, history=None, document_id=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(api_mod, "ask", _down)
+    r = client.post("/api/chat", json={"question": "What is this?"})
+    assert r.status_code == 502
+    assert "unreachable" in r.json()["detail"]
+
+
+def test_chat_stream_timeout_yields_error_event(monkeypatch):
+    """A stalled stream ends with an error event, never a hung SSE."""
+    import rag_demo.api as api_mod
+    from rag_demo.ollama_guard import OllamaTimeoutError
+
+    def _stalled(question, history=None, document_id=None):
+        yield {"token": "partial"}
+        raise OllamaTimeoutError("stalled")
+
+    monkeypatch.setattr(api_mod, "stream_ask", _stalled)
+    r = client.post("/api/chat/stream", json={"question": "What is this?"})
+    assert r.status_code == 200
+    assert "took too long" in r.text

@@ -28,6 +28,7 @@ from .chain import (
     strip_think,
 )
 from .config import Settings, get_settings
+from .ollama_guard import OllamaTimeoutError, invoke_llm, iter_with_idle_timeout
 from .retriever import Hit, Retriever, format_citation
 
 
@@ -560,9 +561,12 @@ def stream_agentic_ask(
             print(f"[{phase}] {message}")
 
     def _invoke(prompt: str) -> str:
-        out = llm.invoke(prompt)
-        text = out.content if hasattr(out, "content") else str(out)
-        return strip_think(text.strip())
+        # Same timeout and retry policy as the classic chain: a hung or
+        # flaky Ollama call fails fast here instead of stalling the
+        # agent loop, which has its own iteration and wall-clock budget.
+        return strip_think(
+            invoke_llm(llm, prompt, settings, label="agent").strip()
+        )
 
     # ---- THOUGHT: plan tool calls ----
     from datetime import date
@@ -761,12 +765,20 @@ def stream_agentic_ask(
     parts: list[str] = []
     think_filter = ThinkBlockFilter()
     try:
-        for chunk in llm.stream(synth_prompt):
+        for chunk in iter_with_idle_timeout(
+            llm.stream(synth_prompt),
+            settings.stream_idle_timeout_seconds,
+            label="agent-stream",
+        ):
             text = chunk.content if hasattr(chunk, "content") else str(chunk)
             parts.append(text)
             visible = think_filter.feed(text)
             if visible:
                 yield {"token": visible}
+    except OllamaTimeoutError:
+        # A stalled synthesis stream fails fast; the one-shot fallback
+        # below would just burn a second full generation.
+        raise
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
         text = _invoke(synth_prompt)
