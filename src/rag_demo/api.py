@@ -224,8 +224,7 @@ async def _drive_stream(iterator, request: Request, *, label: str):
                 # in-flight pull to land so the producer is suspended
                 # and close() can run; if it is still stuck, close()
                 # is a no-op and the producer is reaped when the pull
-                # lands (bounded by the stream idle timeout once the
-                # timeouts work lands; until then, by the model itself).
+                # lands (bounded by the stream idle timeout).
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(pull), timeout=_DISCONNECT_GRACE_SECONDS
@@ -348,26 +347,13 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
 
     async def events():
         final_answer: Answer | None = None
-<<<<<<< HEAD
-        async for event in _drive_stream(
-            stream_ask(
-                req.question, history=req.history or [], document_id=doc_id
-            ),
-            request,
-            label="chat",
-        ):
-            if "token" in event:
-                yield f"data: {json.dumps({'token': event['token']})}\n\n"
-            else:
-                final_answer = event["answer"]
-                payload = {"done": _answer_to_wire(final_answer)}
-                if new_title:
-                    payload["done"]["conversation_title"] = new_title
-                yield f"data: {json.dumps(payload)}\n\n"
-=======
         try:
-            for event in stream_ask(
-                req.question, history=req.history or [], document_id=doc_id
+            async for event in _drive_stream(
+                stream_ask(
+                    req.question, history=req.history or [], document_id=doc_id
+                ),
+                request,
+                label="chat",
             ):
                 if "token" in event:
                     yield f"data: {json.dumps({'token': event['token']})}\n\n"
@@ -407,7 +393,6 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 )
                 return
             raise
->>>>>>> origin/main
         if conv_id and final_answer is not None:
             conv_store.add_message(
                 conv_id,
@@ -713,19 +698,15 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
 
         settings = get_settings()
         final: str | None = None
-<<<<<<< HEAD
-        async for event in _drive_stream(
-            summarize_events(text, get_settings()), request, label="summarize"
-        ):
-            if event["type"] == "done":
-                final = event["summary"]
-            yield f"data: {json.dumps(event)}\n\n"
-=======
         try:
-            for event in iter_with_idle_timeout(
-                summarize_events(text, settings),
-                settings.stream_idle_timeout_seconds,
-                label="summarize-stream",
+            async for event in _drive_stream(
+                iter_with_idle_timeout(
+                    summarize_events(text, settings),
+                    settings.stream_idle_timeout_seconds,
+                    label="summarize-stream",
+                ),
+                request,
+                label="summarize",
             ):
                 if event["type"] == "done":
                     final = event["summary"]
@@ -743,7 +724,6 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
                 + "\n\n"
             )
             return
->>>>>>> origin/main
         if final:
             conv_store.set_document_summary(doc_id, final)
 

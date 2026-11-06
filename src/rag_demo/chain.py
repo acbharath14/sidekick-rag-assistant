@@ -164,16 +164,10 @@ def small_talk_answer(question: str, llm, settings: Settings | None = None) -> s
         "Respond briefly and warmly (1-2 sentences). You are Sidekick, "
         "a helpful RAG assistant. Do not mention sources or citations."
     )
-<<<<<<< HEAD
-    out = tracing.invoke_llm(llm, prompt, run_name="small-talk")
-    text = out.content if hasattr(out, "content") else str(out)
-    return strip_think(text).strip()
-=======
     # Tracing span wraps the guarded call: the span records the call
     # timing while the guard owns the invoke (timeout plus retry).
     with tracing.span("small-talk"):
         return strip_think(invoke_llm(llm, prompt, settings, label="small-talk").strip())
->>>>>>> origin/main
 
 
 def general_knowledge_answer(question: str, llm, settings: Settings | None = None) -> str:
@@ -182,15 +176,9 @@ def general_knowledge_answer(question: str, llm, settings: Settings | None = Non
         "Answer the following question from your general knowledge. "
         "Be concise and accurate.\n\nQuestion: " + question
     )
-<<<<<<< HEAD
-    out = tracing.invoke_llm(llm, prompt, run_name="general-knowledge")
-    text = out.content if hasattr(out, "content") else str(out)
-    text = strip_think(text)
-=======
     # Tracing span wraps the guarded call (see small_talk_answer).
     with tracing.span("general-knowledge"):
         text = strip_think(invoke_llm(llm, prompt, settings, label="general-knowledge"))
->>>>>>> origin/main
     return "🌐 General knowledge (not from your corpus).\n" + text.strip()
 
 
@@ -422,15 +410,10 @@ def _ask_impl(
         episodic_context=episodic_context,
         document_id=document_id,
         capture=capture,
-<<<<<<< HEAD
-    )
-    text = chain.invoke(standalone, config=tracing.run_config(run_name="generate"))
-=======
     )
     text = _invoke_chain(
         chain, standalone, settings, config=tracing.run_config(run_name="generate")
     )
->>>>>>> origin/main
     text = strip_think(text)
     # Server-side hybrid fallback: if the model abstained but hybrid is on,
     # answer from general knowledge instead of showing "No relevant answer".
@@ -562,18 +545,14 @@ def _stream_ask_impl(
     HEAD_CHECK_LEN = 200
     stream_iter = None
     try:
-<<<<<<< HEAD
         stream_iter = chain.stream(
             standalone, config=tracing.run_config(run_name="generate")
         )
-        for chunk in stream_iter:
-=======
         for chunk in iter_with_idle_timeout(
-            chain.stream(standalone, config=tracing.run_config(run_name="generate")),
+            stream_iter,
             settings.stream_idle_timeout_seconds,
             label="chat-stream",
         ):
->>>>>>> origin/main
             parts.append(chunk)
             visible = think_filter.feed(chunk)
             if not visible:
@@ -602,13 +581,9 @@ def _stream_ask_impl(
         raise
     except Exception:
         # Streaming not supported by this LLM — fall back to one shot.
-<<<<<<< HEAD
-        text = chain.invoke(standalone, config=tracing.run_config(run_name="generate"))
-=======
         text = _invoke_chain(
             chain, standalone, settings, config=tracing.run_config(run_name="generate")
         )
->>>>>>> origin/main
         visible = strip_think(text)
         yield {"token": visible}
         parts = [text]

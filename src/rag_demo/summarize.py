@@ -72,19 +72,12 @@ RAW_SECTION_TEMPLATE = (
 
 def _invoke_once(
     llm, prompt: str, timeout: float | None = None, run_name: str | None = None
-<<<<<<< HEAD
-) -> tuple[str, str]:
-    """Single LLM attempt.
-
-    Returns (text, status) where status is "ok", "timeout", or "error".
-=======
 ) -> tuple[str, str, BaseException | None]:
     """Single LLM attempt.
 
     Returns (text, status, exc) where status is "ok", "timeout", or
     "error" and exc is the failure when status is "error". The call is
     recorded in the shared Ollama tracker, like every other LLM call.
->>>>>>> origin/main
     run_name names the Langfuse run when tracing is on (e.g.
     "summarize-single"); None leaves the call untraced.
     """
@@ -127,11 +120,7 @@ def _invoke_once(
 
 def _invoke(llm, prompt: str, timeout: float | None = None, run_name: str | None = None) -> str:
     """Invoke the LLM with a timeout; returns '' on timeout/failure."""
-<<<<<<< HEAD
-    text, _ = _invoke_once(llm, prompt, timeout, run_name=run_name)
-=======
     text, _, _ = _invoke_once(llm, prompt, timeout, run_name=run_name)
->>>>>>> origin/main
     return text
 
 
@@ -149,12 +138,8 @@ def _invoke_with_retry(
     (see module docstring for why). Each retry is logged. Returns
     (text, status).
     """
-<<<<<<< HEAD
-    text, status = _invoke_once(llm, prompt, timeout, run_name=run_name)
-=======
     text, status, exc = _invoke_once(llm, prompt, timeout, run_name=run_name)
     attempt = 1
->>>>>>> origin/main
     for wait in backoff[: max(0, attempts - 1)]:
         if status != "error":
             break
@@ -166,11 +151,7 @@ def _invoke_with_retry(
             )
         attempt += 1
         time.sleep(wait)
-<<<<<<< HEAD
-        text, status = _invoke_once(llm, prompt, timeout, run_name=run_name)
-=======
         text, status, exc = _invoke_once(llm, prompt, timeout, run_name=run_name)
->>>>>>> origin/main
     return text, status
 
 
@@ -186,16 +167,12 @@ def _reduce_summaries(
     combined = "\n\n".join(partials)
     if len(combined) <= REDUCE_LIMIT_CHARS or len(partials) <= 1:
         result, _ = _invoke_with_retry(
-<<<<<<< HEAD
-            llm, REDUCE_PROMPT.format(summaries=combined), timeout, run_name="summarize-reduce"
-=======
             llm,
             REDUCE_PROMPT.format(summaries=combined),
             timeout,
             attempts,
             backoff,
             run_name="summarize-reduce",
->>>>>>> origin/main
         )
         return result
     mid = len(partials) // 2
@@ -228,16 +205,12 @@ def summarize_events(text: str, settings: Settings | None = None):
         if len(text) <= SINGLE_CALL_CHARS:
             yield {"type": "start", "mode": "single", "total": 1}
             result, _ = _invoke_with_retry(
-<<<<<<< HEAD
-                llm, SUMMARY_PROMPT.format(text=text), run_name="summarize-single"
-=======
                 llm,
                 SUMMARY_PROMPT.format(text=text),
                 timeout,
                 attempts,
                 backoff,
                 run_name="summarize-single",
->>>>>>> origin/main
             )
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
             yield {"type": "done", "summary": summary}
@@ -252,16 +225,12 @@ def summarize_events(text: str, settings: Settings | None = None):
         raw_fallbacks = 0
         for i, c in enumerate(chunks, 1):
             p, _ = _invoke_with_retry(
-<<<<<<< HEAD
-                llm, MAP_PROMPT.format(chunk=c), run_name="summarize-map"
-=======
                 llm,
                 MAP_PROMPT.format(chunk=c),
                 timeout,
                 attempts,
                 backoff,
                 run_name="summarize-map",
->>>>>>> origin/main
             )
             if p:
                 partials.append(p)

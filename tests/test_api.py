@@ -133,7 +133,6 @@ def test_upload_scanned_pdf_ocr_failure_surfaces_cause():
     assert "tesseract" in body["error"]
 
 
-<<<<<<< HEAD
 # --- Cancel-on-disconnect for the streaming endpoints ---------------------
 #
 # The stream driver polls request.is_disconnected() while a generation is
@@ -351,7 +350,8 @@ def test_summarize_stream_disconnect_abandons_generation(monkeypatch):
     assert state["pulls"] < 11
     assert not any(e.get("type") == "done" for e in events)
     assert cached == {}
-=======
+
+
 def test_health_reports_ollama_queue():
     """Health exposes the Ollama queue snapshot, so a backed-up Ollama
     is observable from outside the process."""
@@ -416,4 +416,3 @@ def test_chat_stream_timeout_yields_error_event(monkeypatch):
     r = client.post("/api/chat/stream", json={"question": "What is this?"})
     assert r.status_code == 200
     assert "took too long" in r.text
->>>>>>> origin/main
