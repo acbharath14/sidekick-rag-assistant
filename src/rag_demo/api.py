@@ -32,6 +32,13 @@ Auth: when the RAG_DEMO_API_KEY env var is set (non-empty), every /api/*
 endpoint except /api/health requires the matching X-API-Key header
 (401 {"detail": "Invalid or missing API key"} otherwise). When the env var
 is unset or empty, all endpoints are open (local dev).
+
+Rate limiting: the expensive endpoints (/api/chat, /api/chat/stream,
+/api/upload, /api/documents/{id}/summarize and its stream and legacy
+alias) are limited per client per minute (see rag_demo.rate_limit and
+Settings.rate_limit_*_per_minute). Exceeding the limit returns 429
+{"detail": "Rate limit exceeded. Try again later."} with a Retry-After
+header (seconds). /api/health is never limited.
 """
 from __future__ import annotations
 
@@ -62,6 +69,9 @@ from .ollama_guard import (
     run_with_timeout,
 )
 from . import conversations as conv_store
+<<<<<<< HEAD
+from .rate_limit import rate_limit
+=======
 from .observability import (
     FILENAME_PREVIEW_CHARS,
     get_metrics_snapshot,
@@ -77,6 +87,7 @@ from .observability import (
 from .summarize import SINGLE_CALL_CHARS
 
 logger = logging.getLogger(__name__)
+>>>>>>> origin/main
 
 app = FastAPI(title="Sidekick RAG API")
 
@@ -119,6 +130,16 @@ def require_api_key(
 # Shorthand applied to every protected route below. /api/health is
 # deliberately exempt (Docker healthchecks, frontend health indicator).
 _auth = [Depends(require_api_key)]
+
+# Per-client rate limits (see rate_limit.py). Auth runs first, so a bad
+# key gets 401 without consuming quota, and the limiter keys on the
+# validated key. Chat and its stream share one bucket (both hit the LLM);
+# the two summarize routes share one too. /api/health stays unthrottled,
+# and the cheap endpoints (conversations, feedback, config, document
+# list/get/delete) are not limited.
+_rate_chat = [Depends(require_api_key), Depends(rate_limit("chat"))]
+_rate_upload = [Depends(require_api_key), Depends(rate_limit("upload"))]
+_rate_summarize = [Depends(require_api_key), Depends(rate_limit("summarize"))]
 
 
 def _hit_to_wire(h: Any) -> dict:
@@ -294,7 +315,7 @@ def _document_exists(doc_id: str | None) -> str | None:
     return doc_id if conv_store.get_document(doc_id) else None
 
 
-@app.post("/api/chat", dependencies=_auth)
+@app.post("/api/chat", dependencies=_rate_chat)
 def chat(req: ChatRequest) -> dict:
     request_id = new_request_id()
     conv_id = req.conversation_id
@@ -351,9 +372,14 @@ def chat(req: ChatRequest) -> dict:
     return body
 
 
+<<<<<<< HEAD
+@app.post("/api/chat/stream", dependencies=_rate_chat)
+def chat_stream(req: ChatRequest) -> StreamingResponse:
+=======
 @app.post("/api/chat/stream", dependencies=_auth)
 async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     request_id = new_request_id()
+>>>>>>> origin/main
     doc_id = _document_exists(req.document_id)
     conv_id = (
         req.conversation_id
@@ -508,6 +534,12 @@ def config() -> dict:
         "retrieval": settings.retrieval,
         "rerank": settings.rerank_enabled,
         "hybrid_fallback": settings.hybrid_fallback,
+        "rate_limit": {
+            "enabled": settings.rate_limit_enabled,
+            "chat_per_minute": settings.rate_limit_chat_per_minute,
+            "upload_per_minute": settings.rate_limit_upload_per_minute,
+            "summarize_per_minute": settings.rate_limit_summarize_per_minute,
+        },
     }
 
 
@@ -529,12 +561,18 @@ def feedback(req: FeedbackRequest) -> dict:
     return {"ok": True}
 
 
+<<<<<<< HEAD
+@app.post("/api/upload", dependencies=_rate_upload)
+async def upload(file: UploadFile = File(...)) -> dict:
+    """Upload a document into the PERSISTENT knowledge base.
+=======
 # Max files accepted in one POST /api/upload request. The per-file size
 # limit (RAG_DEMO_UPLOAD_MAX_MB, default 10 MB) and per-file validation
 # are unchanged; this cap only bounds the batch so one request cannot
 # queue unbounded indexing work. Overridable per process with
 # RAG_DEMO_UPLOAD_MAX_FILES.
 MAX_UPLOAD_FILES = 10
+>>>>>>> origin/main
 
 
 def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> dict:
@@ -580,9 +618,15 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
     except UnsupportedFormat as e:
         return _fail(str(e))
     except Exception as e:
+<<<<<<< HEAD
+        return {"ok": False, "error": f"Couldn't read {file.filename}: {e}"}
+    if not text.strip() and (file.filename or "").lower().endswith(".pdf"):
+        # Scanned PDF with no embedded text — fall back to OCR, mirroring
+=======
         return _fail(f"Couldn't read {filename}: {e}")
     if not text.strip() and filename.lower().endswith(".pdf"):
         # Scanned PDF with no embedded text: fall back to OCR, mirroring
+>>>>>>> origin/main
         # the old Streamlit app. ocr.py is imported lazily so nothing breaks
         # when the tesseract/poppler binaries are absent.
         from .ocr import INSTALL_HINT, ocr_available, ocr_pdf
@@ -591,6 +635,21 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             try:
                 text = ocr_pdf(data)
             except RuntimeError as e:
+<<<<<<< HEAD
+                return {
+                    "ok": False,
+                    "error": f"No text found in {file.filename} (scanned PDF). {e}",
+                }
+            if text.strip():
+                extractor = "ocr"
+        else:
+            return {
+                "ok": False,
+                "error": (
+                    f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
+                ),
+            }
+=======
                 return _fail(
                     f"No text found in {filename} (scanned PDF). {e}"
                 )
@@ -600,6 +659,7 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             return _fail(
                 f"No text found in {filename} (scanned PDF). {INSTALL_HINT}"
             )
+>>>>>>> origin/main
     if not text.strip():
         return _fail(f"No text found in {filename}.")
 
@@ -649,6 +709,12 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         extractor,
     )
     _upload_texts[doc_id] = text
+<<<<<<< HEAD
+    # The on-disk index changed, so the cached retriever would keep
+    # serving the old vectors. Drop it; the next question reloads.
+    # (Caching contract, see caching.py.)
+    clear_cache()
+=======
     _latency_ms = (_time.perf_counter() - _started) * 1000
     record_upload(_latency_ms, ok=True)
     log_upload_event(
@@ -661,6 +727,7 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         extractor=extractor,
         latency_ms=_latency_ms,
     )
+>>>>>>> origin/main
     return {"ok": True, **doc}
 
 
@@ -745,7 +812,7 @@ def get_document(doc_id: str) -> dict:
     return {"ok": True, **doc}
 
 
-@app.post("/api/documents/{doc_id}/summarize", dependencies=_auth)
+@app.post("/api/documents/{doc_id}/summarize", dependencies=_rate_summarize)
 def summarize_document(doc_id: str) -> dict:
     """(Re)generate the LLM summary for a document and cache it in SQLite."""
     import time as _time
@@ -818,8 +885,13 @@ def summarize_document(doc_id: str) -> dict:
     return {"ok": True, "summary": summary}
 
 
+<<<<<<< HEAD
+@app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_rate_summarize)
+def summarize_document_stream(doc_id: str) -> StreamingResponse:
+=======
 @app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_auth)
 async def summarize_document_stream(doc_id: str, request: Request) -> StreamingResponse:
+>>>>>>> origin/main
     """SSE stream of summarize progress events, then a done event.
 
     Event payloads (see rag_demo.summarize.summarize_events):
@@ -975,11 +1047,14 @@ def delete_document(doc_id: str) -> dict:
         # If nothing remains, leave the (now empty) index files as-is;
         # the next upload will recreate the index.
     _upload_texts.pop(doc_id, None)
+<<<<<<< HEAD
+=======
     log_event(
         "document_delete",
         request_id=new_request_id(),
         doc_id=doc_id,
     )
+>>>>>>> origin/main
     # chunks.json / the FAISS index changed on disk; drop the cached
     # retriever so the next question sees the deletion.
     clear_cache()
@@ -987,7 +1062,7 @@ def delete_document(doc_id: str) -> dict:
 
 
 # Legacy alias: the React UI's summarize button used /api/upload/{id}/summarize.
-@app.post("/api/upload/{doc_id}/summarize", dependencies=_auth)
+@app.post("/api/upload/{doc_id}/summarize", dependencies=_rate_summarize)
 def summarize_upload(doc_id: str) -> dict:
     return summarize_document(doc_id)
 
