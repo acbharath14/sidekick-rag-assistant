@@ -63,7 +63,6 @@ def test_feedback_validation():
     assert r.json()["ok"] is False
 
 
-<<<<<<< HEAD
 # --- Structured logging + metrics (observability) ---
 
 import json as _json
@@ -245,8 +244,6 @@ def test_metrics_latency_summary_math():
         observability.reset_metrics()
     assert observability.get_metrics_snapshot()["questions"] == 0
 
-=======
->>>>>>> origin/main
 def _upload(client, filename="scan.pdf", content=b"%PDF-1.4 fake scanned bytes"):
     return client.post(
         "/api/upload",
@@ -314,9 +311,6 @@ def test_upload_scanned_pdf_ocr_failure_surfaces_cause():
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
-<<<<<<< HEAD
-    assert "tesseract" in body["error"]
-=======
     assert "tesseract" in body["error"]
 
 
@@ -603,4 +597,3 @@ def test_chat_stream_timeout_yields_error_event(monkeypatch):
     r = client.post("/api/chat/stream", json={"question": "What is this?"})
     assert r.status_code == 200
     assert "took too long" in r.text
->>>>>>> origin/main
