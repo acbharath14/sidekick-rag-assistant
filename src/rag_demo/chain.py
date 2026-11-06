@@ -263,12 +263,16 @@ def build_chain(
             ),
         ]
     )
+    def _retrieve(q: str) -> list[Hit]:
+        # The one retrieval per question: store the hits in `capture` so
+        # the answer reuses them for citations instead of searching again.
+        hits = retriever.search(q, user_groups=groups, source_filter=source_filter)
+        if capture is not None:
+            capture["hits"] = hits
+        return hits
+
     # Named so the step shows as "retrieve" in a Langfuse trace.
-    retrieve = RunnableLambda(
-        lambda q: retriever.search(
-            q, user_groups=groups, source_filter=source_filter
-        )
-    ).with_config({"run_name": "retrieve"})
+    retrieve = RunnableLambda(_retrieve).with_config({"run_name": "retrieve"})
 
     def _format_context(hits: list[Hit]) -> str:
         parts = []
@@ -388,13 +392,11 @@ def _ask_impl(
     if settings.hybrid_fallback and is_abstention(text):
         text = general_knowledge_answer(standalone, llm)
     latency_ms = (time.perf_counter() - started) * 1000
-    # Retrieval runs a second time here, after generation, to collect the
-    # citations for the answer. Traced as its own span so the duplication
-    # is visible in the trace.
+    # Citations reuse the hits generation already retrieved (see
+    # _generation_hits): no second search. Traced as its own span so the
+    # reuse is visible in the trace.
     with tracing.span("retrieve-hits"):
-        hits = retriever.search(
-            standalone, user_groups=groups, source_filter=source_filter
-        )
+        hits = _generation_hits(capture, retriever, standalone, groups, source_filter)
     sources = sorted({h.source for h in hits})
     answer = Answer(
         text=text,
@@ -563,13 +565,11 @@ def _stream_ask_impl(
         if flushed:
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
-    # Retrieval runs a second time here, after generation, to collect the
-    # citations for the answer. Traced as its own span so the duplication
-    # is visible in the trace.
+    # Citations reuse the hits generation already retrieved (see
+    # _generation_hits): no second search. Traced as its own span so the
+    # reuse is visible in the trace.
     with tracing.span("retrieve-hits"):
-        hits = retriever.search(
-            standalone, user_groups=groups, source_filter=source_filter
-        )
+        hits = _generation_hits(capture, retriever, standalone, groups, source_filter)
     answer = Answer(
         text=text,
         sources=sorted({h.source for h in hits}),
