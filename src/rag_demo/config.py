@@ -52,6 +52,59 @@ class Settings:
     ollama_base_url: str = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_BASE_URL", "http://localhost:11434")
     )
+    # Ollama timeouts and retries (Phase 1, Wave 2). Defaults preserve the
+    # old behavior: the model call itself keeps its 300s deadline, and a
+    # chat request gets 30s of headroom over that for retrieval and
+    # bookkeeping. The summarize per-call deadline stays 600s, exactly as
+    # summarize.py already used it; it now lives here instead of being
+    # read from the environment inside summarize.py.
+    # RAG_DEMO_LLM_TIMEOUT: deadline for one Ollama call (seconds).
+    llm_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("RAG_DEMO_LLM_TIMEOUT", "300"))
+    )
+    # RAG_DEMO_LLM_RETRY_ATTEMPTS: total tries for one Ollama call,
+    # including the first attempt. Only transient errors (connection
+    # errors, HTTP 5xx) are retried; timeouts never are.
+    llm_retry_attempts: int = field(
+        default_factory=lambda: int(os.environ.get("RAG_DEMO_LLM_RETRY_ATTEMPTS", "3"))
+    )
+    # RAG_DEMO_LLM_RETRY_BACKOFF: comma separated wait between retries,
+    # e.g. "5,15". Same (5, 15) as summarize.py already used.
+    llm_retry_backoff_seconds: tuple[float, ...] = field(
+        default_factory=lambda: tuple(
+            float(v)
+            for v in os.environ.get("RAG_DEMO_LLM_RETRY_BACKOFF", "5,15").split(",")
+            if v.strip()
+        )
+        or (5.0, 15.0)
+    )
+    # RAG_DEMO_CHAT_TIMEOUT: deadline for one /api/chat request
+    # (seconds). 330 covers the 300s model call plus retrieval overhead.
+    chat_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("RAG_DEMO_CHAT_TIMEOUT", "330"))
+    )
+    # RAG_DEMO_STREAM_IDLE_TIMEOUT: longest silence allowed mid-stream
+    # on /api/chat/stream and the summarize stream (seconds). Tokens
+    # normally arrive steadily, so 300s only fires on a genuine stall.
+    stream_idle_timeout_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("RAG_DEMO_STREAM_IDLE_TIMEOUT", "300")
+        )
+    )
+    # RAG_DEMO_SUMMARY_TIMEOUT: deadline for one summarize LLM call.
+    summarize_timeout_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("RAG_DEMO_SUMMARY_TIMEOUT", "600"))
+    )
+    # RAG_DEMO_SUMMARY_REQUEST_TIMEOUT: deadline for one sync summarize
+    # request (seconds). Default 0 means disabled: map-reduce total time
+    # is N chunks times the per-call deadline by design, so a single
+    # request cap would either break long documents or be meaningless.
+    # Set it to bound a single request when that matters more.
+    summarize_request_timeout_seconds: float = field(
+        default_factory=lambda: float(
+            os.environ.get("RAG_DEMO_SUMMARY_REQUEST_TIMEOUT", "0")
+        )
+    )
 
     # Retrieval: "hybrid" (default, BM25 + dense with reciprocal rank
     # fusion) or "dense" (pure vector search).
@@ -171,6 +224,6 @@ def get_llm(settings: Settings):
     return OllamaLLM(
         model=settings.ollama_model,
         base_url=settings.ollama_base_url,
-        timeout=300.0,  # fail fast instead of hanging forever on a stalled server
+        timeout=settings.llm_timeout_seconds,  # fail fast instead of hanging forever on a stalled server
         keep_alive="30m",  # keep the model in RAM between prompts; avoids reload stalls
     )
