@@ -21,6 +21,10 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 sse-starlette>=2.0
 pytest>=8.0
+# Optional: Langfuse tracing (Langfuse Python SDK v4). Installed but
+# inert: tracing stays off unless LANGFUSE_BASE_URL (or LANGFUSE_HOST)
+# plus LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are all set.
+langfuse>=4,<5
 # cryptography>=43 ships no Intel macOS wheels, so pip falls back to a Rust
 # source build on x86_64 Macs. Pin the last Intel-wheel release there;
 # other platforms keep resolving the latest.
