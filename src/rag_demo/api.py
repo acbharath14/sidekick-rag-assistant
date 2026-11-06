@@ -46,6 +46,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .audit import log_feedback
+from .caching import clear_cache
 from .chain import Answer, ask, stream_ask
 from .config import get_embeddings, get_settings
 from . import conversations as conv_store
@@ -454,6 +455,10 @@ async def upload(file: UploadFile = File(...)) -> dict:
         extractor=extractor,
         latency_ms=_latency_ms,
     )
+    # The on-disk index changed, so the cached retriever would keep
+    # serving the old vectors. Drop it; the next question reloads.
+    # (Caching contract, see caching.py.)
+    clear_cache()
     return {"ok": True, **doc}
 
 
@@ -683,6 +688,9 @@ def delete_document(doc_id: str) -> dict:
         request_id=new_request_id(),
         doc_id=doc_id,
     )
+    # chunks.json / the FAISS index changed on disk; drop the cached
+    # retriever so the next question sees the deletion.
+    clear_cache()
     return {"ok": True}
 
 
