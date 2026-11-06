@@ -33,14 +33,16 @@ is unset or empty, all endpoints are open (local dev).
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+import logging
 import os
 import uuid
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi import status as http_status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -58,6 +60,8 @@ from .ollama_guard import (
     run_with_timeout,
 )
 from . import conversations as conv_store
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sidekick RAG API")
 
@@ -117,6 +121,135 @@ def _answer_to_wire(a: Answer) -> dict:
         "standalone_question": a.standalone_question,
         "weak_evidence": a.weak_evidence,
     }
+
+
+# --- Cancel-on-disconnect for the streaming endpoints ---------------------
+#
+# The two SSE endpoints below drive their producer (stream_ask /
+# summarize_events) one item at a time in a worker thread while a small
+# watcher task probes request.is_disconnected(). When the client goes
+# away mid-generation the driver closes the producer iterator: that
+# raises GeneratorExit inside the producer, whose finally closes the
+# underlying chain stream, which closes the Ollama HTTP stream, so the
+# model stops generating instead of finishing tokens nobody reads.
+# The SSE contract for connected clients is unchanged: same events, same
+# order, same error events. A disconnect ends the stream quietly (no
+# error event, no 500): there is nobody left to tell.
+#
+# The endpoints are async for exactly this reason: is_disconnected() is
+# a coroutine, and the sync producers must run off the event loop so the
+# watcher can run while a token is in flight.
+
+_DISCONNECT_POLL_SECONDS = 0.2
+_DISCONNECT_GRACE_SECONDS = 5.0
+
+
+def _pull(iterator):
+    """One pull from a sync iterator, for a worker thread.
+
+    Returns (True, item), or (False, None) at exhaustion. Producer
+    errors propagate to the caller.
+    """
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None
+
+
+def _close_iterator(iterator) -> None:
+    """Close a producer iterator, best effort.
+
+    Closing raises GeneratorExit inside the producer so it can release
+    its model call. A ValueError means the producer is still executing
+    in another thread (a token pull is in flight); the iterator is
+    reaped when that pull lands, so there is nothing more to do here.
+    """
+    close = getattr(iterator, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except ValueError:
+        pass
+
+
+async def _watch_disconnect(request: Request) -> bool:
+    """Return True when the client disconnects; never raises.
+
+    Probes request.is_disconnected() until it says True. Starlette's
+    probe waits for the next ASGI message, which only arrives on
+    disconnect, so one probe usually blocks until then; if a server
+    answers False at once instead, sleep briefly and probe again.
+    A probe that errors is logged once and treated as still connected,
+    so a broken probe can never kill a healthy stream.
+    """
+    logged = False
+    while True:
+        try:
+            if await request.is_disconnected():
+                return True
+        except Exception:
+            if not logged:
+                logger.warning(
+                    "disconnect probe failed; assuming client still connected",
+                    exc_info=True,
+                )
+                logged = True
+        await asyncio.sleep(_DISCONNECT_POLL_SECONDS)
+
+
+async def _drive_stream(iterator, request: Request, *, label: str):
+    """Yield items from a sync producer iterator, stopping on disconnect.
+
+    Each pull runs in a worker thread so the event loop stays free to
+    notice the disconnect while a token is in flight. On disconnect the
+    producer is closed (see _close_iterator), one log line is written,
+    and iteration ends with no error event: the client is gone. Producer
+    errors pass through unchanged, so the existing error handling in the
+    caller still applies.
+    """
+    watcher = asyncio.ensure_future(_watch_disconnect(request))
+    yielded = 0
+    try:
+        loop = asyncio.get_running_loop()
+        while True:
+            pull = asyncio.ensure_future(
+                loop.run_in_executor(None, _pull, iterator)
+            )
+            done, _pending = await asyncio.wait(
+                {pull, watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if watcher in done:
+                # The client left mid-generation. Wait briefly for the
+                # in-flight pull to land so the producer is suspended
+                # and close() can run; if it is still stuck, close()
+                # is a no-op and the producer is reaped when the pull
+                # lands (bounded by the stream idle timeout).
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(pull), timeout=_DISCONNECT_GRACE_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                _close_iterator(iterator)
+                logger.info(
+                    "client disconnected; cancelled %s stream after %d events",
+                    label,
+                    yielded,
+                )
+                return
+            try:
+                has_item, item = pull.result()
+            except BaseException:
+                _close_iterator(iterator)
+                raise
+            if not has_item:
+                return
+            yielded += 1
+            yield item
+    finally:
+        if not watcher.done():
+            watcher.cancel()
 
 
 class ChatRequest(BaseModel):
@@ -199,7 +332,7 @@ def chat(req: ChatRequest) -> dict:
 
 
 @app.post("/api/chat/stream", dependencies=_auth)
-def chat_stream(req: ChatRequest) -> StreamingResponse:
+async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     doc_id = _document_exists(req.document_id)
     conv_id = (
         req.conversation_id
@@ -212,11 +345,15 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
     else:
         new_title = None
 
-    def events():
+    async def events():
         final_answer: Answer | None = None
         try:
-            for event in stream_ask(
-                req.question, history=req.history or [], document_id=doc_id
+            async for event in _drive_stream(
+                stream_ask(
+                    req.question, history=req.history or [], document_id=doc_id
+                ),
+                request,
+                label="chat",
             ):
                 if "token" in event:
                     yield f"data: {json.dumps({'token': event['token']})}\n\n"
@@ -527,7 +664,7 @@ def summarize_document(doc_id: str) -> dict:
 
 
 @app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_auth)
-def summarize_document_stream(doc_id: str) -> StreamingResponse:
+async def summarize_document_stream(doc_id: str, request: Request) -> StreamingResponse:
     """SSE stream of summarize progress events, then a done event.
 
     Event payloads (see rag_demo.summarize.summarize_events):
@@ -537,6 +674,8 @@ def summarize_document_stream(doc_id: str) -> StreamingResponse:
       {"type": "done", "summary": "..."}
       {"type": "error", "error": "..."}
     The final summary is cached in SQLite exactly like the sync endpoint.
+    If the client disconnects mid-summary, generation is cancelled (see
+    _drive_stream) and nothing is cached: no partial summary is stored.
     """
 
     def _error_event(message: str):
@@ -554,16 +693,20 @@ def summarize_document_stream(doc_id: str) -> StreamingResponse:
             media_type="text/event-stream",
         )
 
-    def events():
+    async def events():
         from .summarize import summarize_events
 
         settings = get_settings()
         final: str | None = None
         try:
-            for event in iter_with_idle_timeout(
-                summarize_events(text, settings),
-                settings.stream_idle_timeout_seconds,
-                label="summarize-stream",
+            async for event in _drive_stream(
+                iter_with_idle_timeout(
+                    summarize_events(text, settings),
+                    settings.stream_idle_timeout_seconds,
+                    label="summarize-stream",
+                ),
+                request,
+                label="summarize",
             ):
                 if event["type"] == "done":
                     final = event["summary"]

@@ -414,6 +414,53 @@ def test_stream_ask_yields_tokens_then_answer(_indexed):
     assert answers[0].sources
 
 
+def test_stream_ask_close_abandons_chain_stream(monkeypatch, _indexed):
+    """Closing the stream_ask generator mid-stream closes the underlying
+    chain stream, so a disconnected client stops the model call instead
+    of letting generation run on. Tokens are 60 chars so the head buffer
+    flushes mid-stream (four pulls reach 200 chars); closing after the
+    second yielded token must leave the fifth token unpulled."""
+    from rag_demo.chain import stream_ask
+
+    class FakeChain:
+        def __init__(self):
+            self.pulls = 0
+            self.closed = False
+
+        # Main's Langfuse tracing (#55) passes config= to both calls, so
+        # the fake accepts (and ignores) it like the real chain does.
+        def stream(self, question, config=None):
+            try:
+                for _ in range(5):
+                    self.pulls += 1
+                    yield "x" * 60
+            except GeneratorExit:
+                self.closed = True
+                raise
+
+        def invoke(self, question, config=None):
+            return "unused"
+
+    class FakeRetriever:
+        last_candidates = 0
+        last_floor_dropped = 0
+
+        def search(self, *a, **k):
+            return []
+
+    fake = FakeChain()
+    monkeypatch.setattr(
+        "rag_demo.chain.build_chain",
+        lambda *a, **k: (fake, FakeRetriever(), ["*"]),
+    )
+    gen = stream_ask("What is the max parcel weight?", _indexed)
+    assert "token" in next(gen)
+    assert "token" in next(gen)
+    gen.close()
+    assert fake.closed is True
+    assert fake.pulls == 4
+
+
 def test_system_prompt_handles_small_talk():
     from rag_demo.chain import SYSTEM
 

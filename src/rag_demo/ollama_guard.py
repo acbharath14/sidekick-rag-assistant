@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
-import queue
 import re
 import threading
 import time
@@ -70,9 +69,6 @@ _TRANSIENT_MESSAGE_FRAGMENTS = (
     "bad gateway",
 )
 _SERVER_ERROR_RE = re.compile(r"\b(500|502|503|504)\b")
-_SENTINEL = object()
-
-
 class OllamaTimeoutError(TimeoutError):
     """An Ollama call (or the wait for a call slot) exceeded its deadline.
 
@@ -412,36 +408,49 @@ def run_with_timeout(fn, timeout: float, *, label: str = "request"):
 def iter_with_idle_timeout(iterator, idle_timeout: float, *, label: str = "stream"):
     """Yield from iterator, failing fast when it stalls.
 
-    If no item arrives within idle_timeout seconds, raises
-    OllamaTimeoutError and abandons the pump thread (daemon), so a
-    stalled stream cannot hang the SSE response forever.
+    Pulls one item at a time, only when the consumer asks for it: no
+    item is ever pulled ahead of demand, so closing this iterator
+    closes the source with nothing already consumed past the last
+    item the consumer saw. Each pull runs in a worker thread with an
+    idle deadline; if no item arrives within idle_timeout seconds,
+    raises OllamaTimeoutError and abandons the worker thread, so a
+    stalled stream cannot hang the SSE response forever. Producer
+    errors propagate to the consumer unchanged.
     """
-    q: queue.Queue = queue.Queue()
-
-    def _pump() -> None:
-        try:
-            for item in iterator:
-                q.put(item)
-            q.put(_SENTINEL)
-        except BaseException as e:  # noqa: BLE001: re-raised to the consumer
-            q.put(e)
 
     def _generate():
-        thread = threading.Thread(target=_pump, daemon=True)
-        with track_call(label, acquire_timeout=idle_timeout):
-            thread.start()
-            while True:
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            with track_call(label, acquire_timeout=idle_timeout):
+                while True:
+                    future = ex.submit(next, iterator)
+                    try:
+                        item = future.result(timeout=idle_timeout)
+                    except StopIteration:
+                        return
+                    except TimeoutError:
+                        if future.done():
+                            # The worker itself raised a timeout error;
+                            # propagate it unchanged, not as a stall.
+                            raise
+                        raise OllamaTimeoutError(
+                            f"Ollama stream '{label}' stalled: no output for "
+                            f"{idle_timeout:g} seconds. Try again in a moment."
+                        )
+                    yield item
+        finally:
+            # Closing this generator (consumer disconnect, or the end
+            # of the stream) closes the source, so the producer stops
+            # instead of running on for nobody. close() on a source
+            # that is mid-pull in the worker raises ValueError; that
+            # pull was the last one — nothing is ever pulled again —
+            # so the worker is simply abandoned with the executor.
+            close = getattr(iterator, "close", None)
+            if close is not None:
                 try:
-                    item = q.get(timeout=idle_timeout)
-                except queue.Empty:
-                    raise OllamaTimeoutError(
-                        f"Ollama stream '{label}' stalled: no output for "
-                        f"{idle_timeout:g} seconds. Try again in a moment."
-                    )
-                if item is _SENTINEL:
-                    return
-                if isinstance(item, BaseException):
-                    raise item
-                yield item
+                    close()
+                except ValueError:
+                    pass
+            ex.shutdown(wait=False, cancel_futures=True)
 
     return _generate()
