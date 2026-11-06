@@ -175,7 +175,7 @@ def _scoring_cases():
          "rerank", {"before": 1, "after": 2, "improved": False}),
         ("rerank-target-absent",
          p_rank, [_hit("a.md")], {"hits_norerank": [_hit("a.md")]},
-         "rerank", {"before": None, "after": 1, "improved": None}),
+         "rerank", {"before": None, "after": None, "improved": None}),
         ("rerank-na-no-baseline",
          p_rank, after, {}, "rerank", None),
         # accuracy: keywords all present / missing / no answer /
