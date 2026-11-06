@@ -555,11 +555,8 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
 
     from .extract import UnsupportedFormat, extract_text_with_meta, verify_magic_bytes
 
-<<<<<<< HEAD
-=======
     request_id = new_request_id()
     _started = _time.perf_counter()
-    _filename = file.filename or "upload"
 
     def _fail(error: str) -> dict:
         # No behavior change: same error body as before, only counted
@@ -571,38 +568,21 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             where="upload",
             error_type="UploadError",
             error=error,
-            filename=truncate_preview(_filename, FILENAME_PREVIEW_CHARS),
+            filename=truncate_preview(filename, FILENAME_PREVIEW_CHARS),
         )
         return {"ok": False, "error": error}
-
-    settings = get_settings()
-    max_mb = float(os.environ.get("RAG_DEMO_UPLOAD_MAX_MB", "10"))
-    data = await file.read()
->>>>>>> origin/main
     if len(data) > max_mb * 1024 * 1024:
         return _fail(f"File too large (over {max_mb:.0f} MB).")
     try:
-<<<<<<< HEAD
         if not verify_magic_bytes(filename, data):
-            return {"ok": False, "error": "File content doesn't match its extension."}
-        text, extractor = extract_text_with_meta(filename, data)
-=======
-        if not verify_magic_bytes(file.filename or "upload", data):
             return _fail("File content doesn't match its extension.")
-        text, extractor = extract_text_with_meta(file.filename or "upload", data)
->>>>>>> origin/main
+        text, extractor = extract_text_with_meta(filename, data)
     except UnsupportedFormat as e:
         return _fail(str(e))
     except Exception as e:
-<<<<<<< HEAD
-        return {"ok": False, "error": f"Couldn't read {filename}: {e}"}
+        return _fail(f"Couldn't read {filename}: {e}")
     if not text.strip() and filename.lower().endswith(".pdf"):
         # Scanned PDF with no embedded text: fall back to OCR, mirroring
-=======
-        return _fail(f"Couldn't read {file.filename}: {e}")
-    if not text.strip() and (file.filename or "").lower().endswith(".pdf"):
-        # Scanned PDF with no embedded text — fall back to OCR, mirroring
->>>>>>> origin/main
         # the old Streamlit app. ocr.py is imported lazily so nothing breaks
         # when the tesseract/poppler binaries are absent.
         from .ocr import INSTALL_HINT, ocr_available, ocr_pdf
@@ -611,35 +591,17 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             try:
                 text = ocr_pdf(data)
             except RuntimeError as e:
-<<<<<<< HEAD
-                return {
-                    "ok": False,
-                    "error": f"No text found in {filename} (scanned PDF). {e}",
-                }
-            if text.strip():
-                extractor = "ocr"
-        else:
-            return {
-                "ok": False,
-                "error": (
-                    f"No text found in {filename} (scanned PDF). {INSTALL_HINT}"
-                ),
-            }
-    if not text.strip():
-        return {"ok": False, "error": f"No text found in {filename}."}
-=======
                 return _fail(
-                    f"No text found in {file.filename} (scanned PDF). {e}"
+                    f"No text found in {filename} (scanned PDF). {e}"
                 )
             if text.strip():
                 extractor = "ocr"
         else:
             return _fail(
-                f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
+                f"No text found in {filename} (scanned PDF). {INSTALL_HINT}"
             )
     if not text.strip():
-        return _fail(f"No text found in {file.filename}.")
->>>>>>> origin/main
+        return _fail(f"No text found in {filename}.")
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap
@@ -687,25 +649,18 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         extractor,
     )
     _upload_texts[doc_id] = text
-<<<<<<< HEAD
-=======
     _latency_ms = (_time.perf_counter() - _started) * 1000
     record_upload(_latency_ms, ok=True)
     log_upload_event(
         request_id=request_id,
         doc_id=doc_id,
-        filename=_filename,
+        filename=filename,
         chunks=len(chunks),
         chars=len(text),
         size_bytes=len(data),
         extractor=extractor,
         latency_ms=_latency_ms,
     )
->>>>>>> origin/main
-    # The on-disk index changed, so the cached retriever would keep
-    # serving the old vectors. Drop it; the next question reloads.
-    # (Caching contract, see caching.py.)
-    clear_cache()
     return {"ok": True, **doc}
 
 
@@ -1020,14 +975,11 @@ def delete_document(doc_id: str) -> dict:
         # If nothing remains, leave the (now empty) index files as-is;
         # the next upload will recreate the index.
     _upload_texts.pop(doc_id, None)
-<<<<<<< HEAD
-=======
     log_event(
         "document_delete",
         request_id=new_request_id(),
         doc_id=doc_id,
     )
->>>>>>> origin/main
     # chunks.json / the FAISS index changed on disk; drop the cached
     # retriever so the next question sees the deletion.
     clear_cache()

@@ -64,8 +64,6 @@ def test_feedback_validation():
     assert r.json()["ok"] is False
 
 
-<<<<<<< HEAD
-=======
 # --- Structured logging + metrics (observability) ---
 
 import json as _json
@@ -252,7 +250,6 @@ def test_metrics_latency_summary_math():
         observability.reset_metrics()
     assert observability.get_metrics_snapshot()["questions"] == 0
 
->>>>>>> origin/main
 def _upload(client, filename="scan.pdf", content=b"%PDF-1.4 fake scanned bytes"):
     return client.post(
         "/api/upload",
@@ -323,119 +320,6 @@ def test_upload_scanned_pdf_ocr_failure_surfaces_cause():
     assert "tesseract" in body["error"]
 
 
-<<<<<<< HEAD
-def _upload_files(client, files):
-    """POST /api/upload with several files under the repeated "file" field.
-
-    files: list of (filename, bytes) tuples.
-    """
-    return client.post(
-        "/api/upload",
-        files=[("file", (name, content)) for name, content in files],
-    )
-
-
-def _delete_doc(client, doc_id):
-    d = client.delete(f"/api/documents/{doc_id}")
-    assert d.json()["ok"] is True, d.json()
-
-
-def test_upload_two_files_both_ingest():
-    r = _upload_files(client, [
-        ("one.txt", b"First document about cats."),
-        ("two.txt", b"Second document about dogs."),
-    ])
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True, body
-    assert body["succeeded"] == 2 and body["failed"] == 0
-    assert len(body["results"]) == 2
-    ids = []
-    for result, name in zip(body["results"], ("one.txt", "two.txt")):
-        assert result["ok"] is True, result
-        assert result["filename"] == name
-        assert result["extractor"] == "txt"
-        ids.append(result["id"])
-    assert ids[0] != ids[1]
-    for doc_id in ids:
-        _delete_doc(client, doc_id)
-
-
-def test_upload_mixed_batch_keeps_good_file():
-    r = _upload_files(client, [
-        ("good.txt", b"A perfectly fine document."),
-        ("bad.exe", b"MZ fake binary, not a document"),
-    ])
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is False  # one file failed
-    assert body["succeeded"] == 1 and body["failed"] == 1
-    good, bad = body["results"]
-    assert good["filename"] == "good.txt" and good["ok"] is True
-    assert bad["filename"] == "bad.exe" and bad["ok"] is False
-    assert bad["error"]
-    # The good file survived: it is retrievable, not rolled back.
-    got = client.get(f"/api/documents/{good['id']}")
-    assert got.json()["ok"] is True
-    _delete_doc(client, good["id"])
-
-
-def test_upload_single_file_keeps_legacy_shape():
-    r = client.post("/api/upload", files={"file": ("solo.txt", b"Solo document.")})
-    assert r.status_code == 200
-    body = r.json()
-    assert "results" not in body
-    assert body["ok"] is True
-    assert set(body.keys()) == {
-        "ok", "id", "filename", "chunk_count", "char_count",
-        "file_size", "extractor", "summary", "uploaded_at",
-    }
-    assert body["filename"] == "solo.txt"
-    _delete_doc(client, body["id"])
-
-
-def test_upload_single_file_failure_keeps_legacy_shape():
-    r = client.post("/api/upload", files={"file": ("bad.exe", b"MZ nope")})
-    body = r.json()
-    assert body["ok"] is False
-    assert set(body.keys()) == {"ok", "error"}
-
-
-def test_upload_batch_invalidates_cache_once():
-    """The cached retriever is dropped once per batch, not once per file,
-    and not at all when every file fails (nothing changed on disk)."""
-    from unittest.mock import patch
-
-    with patch("rag_demo.api.clear_cache") as mock_clear:
-        r = _upload_files(client, [
-            ("a.txt", b"Cache test document one."),
-            ("b.txt", b"Cache test document two."),
-        ])
-        assert r.json()["ok"] is True, r.json()
-        assert mock_clear.call_count == 1
-        ids = [result["id"] for result in r.json()["results"]]
-        # An all-failing batch changes nothing, so no second invalidation.
-        r = _upload_files(client, [
-            ("bad1.exe", b"MZ nope"),
-            ("bad2.exe", b"MZ nope"),
-        ])
-        assert r.json()["ok"] is False
-        assert mock_clear.call_count == 1
-    for doc_id in ids:
-        _delete_doc(client, doc_id)
-
-
-def test_upload_file_count_cap(monkeypatch):
-    monkeypatch.setenv("RAG_DEMO_UPLOAD_MAX_FILES", "2")
-    r = _upload_files(client, [
-        ("1.txt", b"one"),
-        ("2.txt", b"two"),
-        ("3.txt", b"three"),
-    ])
-    body = r.json()
-    assert body["ok"] is False
-    assert "max 2" in body["error"]
-=======
 # --- Cancel-on-disconnect for the streaming endpoints ---------------------
 #
 # The stream driver polls request.is_disconnected() while a generation is
@@ -722,4 +606,116 @@ def test_chat_stream_timeout_yields_error_event(monkeypatch):
     r = client.post("/api/chat/stream", json={"question": "What is this?"})
     assert r.status_code == 200
     assert "took too long" in r.text
->>>>>>> origin/main
+
+
+def _upload_files(client, files):
+    """POST /api/upload with several files under the repeated "file" field.
+
+    files: list of (filename, bytes) tuples.
+    """
+    return client.post(
+        "/api/upload",
+        files=[("file", (name, content)) for name, content in files],
+    )
+
+
+def _delete_doc(client, doc_id):
+    d = client.delete(f"/api/documents/{doc_id}")
+    assert d.json()["ok"] is True, d.json()
+
+
+def test_upload_two_files_both_ingest():
+    r = _upload_files(client, [
+        ("one.txt", b"First document about cats."),
+        ("two.txt", b"Second document about dogs."),
+    ])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, body
+    assert body["succeeded"] == 2 and body["failed"] == 0
+    assert len(body["results"]) == 2
+    ids = []
+    for result, name in zip(body["results"], ("one.txt", "two.txt")):
+        assert result["ok"] is True, result
+        assert result["filename"] == name
+        assert result["extractor"] == "txt"
+        ids.append(result["id"])
+    assert ids[0] != ids[1]
+    for doc_id in ids:
+        _delete_doc(client, doc_id)
+
+
+def test_upload_mixed_batch_keeps_good_file():
+    r = _upload_files(client, [
+        ("good.txt", b"A perfectly fine document."),
+        ("bad.exe", b"MZ fake binary, not a document"),
+    ])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False  # one file failed
+    assert body["succeeded"] == 1 and body["failed"] == 1
+    good, bad = body["results"]
+    assert good["filename"] == "good.txt" and good["ok"] is True
+    assert bad["filename"] == "bad.exe" and bad["ok"] is False
+    assert bad["error"]
+    # The good file survived: it is retrievable, not rolled back.
+    got = client.get(f"/api/documents/{good['id']}")
+    assert got.json()["ok"] is True
+    _delete_doc(client, good["id"])
+
+
+def test_upload_single_file_keeps_legacy_shape():
+    r = client.post("/api/upload", files={"file": ("solo.txt", b"Solo document.")})
+    assert r.status_code == 200
+    body = r.json()
+    assert "results" not in body
+    assert body["ok"] is True
+    assert set(body.keys()) == {
+        "ok", "id", "filename", "chunk_count", "char_count",
+        "file_size", "extractor", "summary", "uploaded_at",
+    }
+    assert body["filename"] == "solo.txt"
+    _delete_doc(client, body["id"])
+
+
+def test_upload_single_file_failure_keeps_legacy_shape():
+    r = client.post("/api/upload", files={"file": ("bad.exe", b"MZ nope")})
+    body = r.json()
+    assert body["ok"] is False
+    assert set(body.keys()) == {"ok", "error"}
+
+
+def test_upload_batch_invalidates_cache_once():
+    """The cached retriever is dropped once per batch, not once per file,
+    and not at all when every file fails (nothing changed on disk)."""
+    from unittest.mock import patch
+
+    with patch("rag_demo.api.clear_cache") as mock_clear:
+        r = _upload_files(client, [
+            ("a.txt", b"Cache test document one."),
+            ("b.txt", b"Cache test document two."),
+        ])
+        assert r.json()["ok"] is True, r.json()
+        assert mock_clear.call_count == 1
+        ids = [result["id"] for result in r.json()["results"]]
+        # An all-failing batch changes nothing, so no second invalidation.
+        r = _upload_files(client, [
+            ("bad1.exe", b"MZ nope"),
+            ("bad2.exe", b"MZ nope"),
+        ])
+        assert r.json()["ok"] is False
+        assert mock_clear.call_count == 1
+    for doc_id in ids:
+        _delete_doc(client, doc_id)
+
+
+def test_upload_file_count_cap(monkeypatch):
+    monkeypatch.setenv("RAG_DEMO_UPLOAD_MAX_FILES", "2")
+    r = _upload_files(client, [
+        ("1.txt", b"one"),
+        ("2.txt", b"two"),
+        ("3.txt", b"three"),
+    ])
+    body = r.json()
+    assert body["ok"] is False
+    assert "max 2" in body["error"]
