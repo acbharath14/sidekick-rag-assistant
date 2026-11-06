@@ -13,3 +13,7 @@ chats/
 # React frontend (web/)
 web/node_modules/
 web/dist/
+# Local runtime junk (episodic memory, feedback log, agent state) — never commit.
+.lancedb_episodic/
+feedback.jsonl
+.agents/
