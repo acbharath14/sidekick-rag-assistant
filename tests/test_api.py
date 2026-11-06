@@ -94,7 +94,9 @@ def test_rate_limit_upload_and_summarize_buckets(monkeypatch, tmp_path):
     from unittest.mock import patch
 
     # Upload: extraction is mocked (same pattern as the OCR test) and the
-    # index dir is a temp dir, so no real index or SQLite file is touched.
+    # index dir is a temp dir, so no real index is touched. The document
+    # record still goes into the shared test conversations DB, so it is
+    # deleted below after the summarize assertions.
     with _limited(
         monkeypatch,
         RAG_DEMO_RATE_LIMIT_UPLOAD_PER_MINUTE="1",
@@ -112,6 +114,7 @@ def test_rate_limit_upload_and_summarize_buckets(monkeypatch, tmp_path):
             r = client.post("/api/upload", files=files)
             assert r.status_code == 200
             assert r.json()["ok"] is True
+            doc_id = r.json()["id"]
             r = client.post("/api/upload", files=files)
             assert r.status_code == 429
             assert "retry-after" in r.headers
@@ -123,6 +126,9 @@ def test_rate_limit_upload_and_summarize_buckets(monkeypatch, tmp_path):
         assert r.status_code == 429
         r = client.post("/api/upload/nope/summarize")
         assert r.status_code == 429
+        # Cleanup: the upload recorded this document in the shared test
+        # conversations DB, so delete it (DELETE is not rate-limited).
+        _delete_doc(client, doc_id)
 
 
 def test_health_is_not_rate_limited(monkeypatch):
