@@ -194,7 +194,9 @@ class Retriever:
             self.store = store
             self.chunks = chunks or []
         else:
-            if not self.settings.index_dir.exists():
+            # A built index is signalled by index.faiss, not the
+            # directory: an existing-but-empty dir has no index to load.
+            if not (self.settings.index_dir / "index.faiss").exists():
                 if self.settings.fake:
                     # Fake tier (tests/CI): no index on disk — empty stub so
                     # API shape tests pass without running ingest first.

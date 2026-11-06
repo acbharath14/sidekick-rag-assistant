@@ -637,10 +637,12 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         {"source": source_name, "allowed_groups": ["*"]} for _ in chunks
     ]
 
-    # Append vectors to the persistent FAISS index.
+    # Append vectors to the persistent FAISS index. A built index is
+    # signalled by index.faiss, not the directory: an existing-but-empty
+    # dir must create the index, not crash in load_local.
     index_dir = settings.index_dir
     embeddings = get_embeddings(settings)
-    if index_dir.exists():
+    if (index_dir / "index.faiss").exists():
         store = FAISS.load_local(
             str(index_dir), embeddings, allow_dangerous_deserialization=True
         )
