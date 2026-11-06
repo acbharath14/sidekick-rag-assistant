@@ -348,7 +348,10 @@ model reload on CPU.
 | GET | `/api/metrics` | In-memory counters + latency summaries (no new dependency) |
 | POST | `/api/feedback` | Thumbs up/down vote |
 
-<<<<<<< HEAD
+### Observability
+
+Every question, upload, summarize, and error writes one JSON log line to stdout (the uvicorn log), so latency and health are visible with no external service. A question line carries a request id, endpoint, model, per-step timings in milliseconds (rewrite, retrieve, generate, total; rerank time stays inside retrieve), hit count, source names, and whether the retriever was rebuilt. Question text is logged truncated to the first 120 characters with common secret shapes redacted; answer text and document text are never logged. `GET /api/metrics` returns the same counters as JSON: questions served (streamed split out), uploads and summarizes with error counts, Ollama errors and timeouts, per-step latency (count, mean, p95 over the last 1000 samples), and cache hits/reloads when the caching module reports them. Counts reset on restart. Set `RAG_DEMO_LOG_LEVEL` to change log verbosity (default INFO).
+
 ### Rate limiting
 
 The expensive endpoints are limited per client (one bucket per API key,
@@ -365,11 +368,6 @@ in memory per process and reset on restart. `/api/health` is never
 limited, and neither are the cheap read/write endpoints. If the limiter
 itself errors, requests fail open (logged, let through) instead of
 returning 500s. The effective limits are visible at `GET /api/config`.
-=======
-### Observability
-
-Every question, upload, summarize, and error writes one JSON log line to stdout (the uvicorn log), so latency and health are visible with no external service. A question line carries a request id, endpoint, model, per-step timings in milliseconds (rewrite, retrieve, generate, total; rerank time stays inside retrieve), hit count, source names, and whether the retriever was rebuilt. Question text is logged truncated to the first 120 characters with common secret shapes redacted; answer text and document text are never logged. `GET /api/metrics` returns the same counters as JSON: questions served (streamed split out), uploads and summarizes with error counts, Ollama errors and timeouts, per-step latency (count, mean, p95 over the last 1000 samples), and cache hits/reloads when the caching module reports them. Counts reset on restart. Set `RAG_DEMO_LOG_LEVEL` to change log verbosity (default INFO).
->>>>>>> origin/main
 
 ### Architecture note
 

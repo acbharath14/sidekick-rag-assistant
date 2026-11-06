@@ -69,9 +69,6 @@ from .ollama_guard import (
     run_with_timeout,
 )
 from . import conversations as conv_store
-<<<<<<< HEAD
-from .rate_limit import rate_limit
-=======
 from .observability import (
     FILENAME_PREVIEW_CHARS,
     get_metrics_snapshot,
@@ -84,10 +81,10 @@ from .observability import (
     record_upload,
     truncate_preview,
 )
+from .rate_limit import rate_limit
 from .summarize import SINGLE_CALL_CHARS
 
 logger = logging.getLogger(__name__)
->>>>>>> origin/main
 
 app = FastAPI(title="Sidekick RAG API")
 
@@ -372,14 +369,9 @@ def chat(req: ChatRequest) -> dict:
     return body
 
 
-<<<<<<< HEAD
 @app.post("/api/chat/stream", dependencies=_rate_chat)
-def chat_stream(req: ChatRequest) -> StreamingResponse:
-=======
-@app.post("/api/chat/stream", dependencies=_auth)
 async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     request_id = new_request_id()
->>>>>>> origin/main
     doc_id = _document_exists(req.document_id)
     conv_id = (
         req.conversation_id
@@ -561,18 +553,12 @@ def feedback(req: FeedbackRequest) -> dict:
     return {"ok": True}
 
 
-<<<<<<< HEAD
-@app.post("/api/upload", dependencies=_rate_upload)
-async def upload(file: UploadFile = File(...)) -> dict:
-    """Upload a document into the PERSISTENT knowledge base.
-=======
 # Max files accepted in one POST /api/upload request. The per-file size
 # limit (RAG_DEMO_UPLOAD_MAX_MB, default 10 MB) and per-file validation
 # are unchanged; this cap only bounds the batch so one request cannot
 # queue unbounded indexing work. Overridable per process with
 # RAG_DEMO_UPLOAD_MAX_FILES.
 MAX_UPLOAD_FILES = 10
->>>>>>> origin/main
 
 
 def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> dict:
@@ -618,15 +604,9 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
     except UnsupportedFormat as e:
         return _fail(str(e))
     except Exception as e:
-<<<<<<< HEAD
-        return {"ok": False, "error": f"Couldn't read {file.filename}: {e}"}
-    if not text.strip() and (file.filename or "").lower().endswith(".pdf"):
-        # Scanned PDF with no embedded text — fall back to OCR, mirroring
-=======
         return _fail(f"Couldn't read {filename}: {e}")
     if not text.strip() and filename.lower().endswith(".pdf"):
         # Scanned PDF with no embedded text: fall back to OCR, mirroring
->>>>>>> origin/main
         # the old Streamlit app. ocr.py is imported lazily so nothing breaks
         # when the tesseract/poppler binaries are absent.
         from .ocr import INSTALL_HINT, ocr_available, ocr_pdf
@@ -635,21 +615,6 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             try:
                 text = ocr_pdf(data)
             except RuntimeError as e:
-<<<<<<< HEAD
-                return {
-                    "ok": False,
-                    "error": f"No text found in {file.filename} (scanned PDF). {e}",
-                }
-            if text.strip():
-                extractor = "ocr"
-        else:
-            return {
-                "ok": False,
-                "error": (
-                    f"No text found in {file.filename} (scanned PDF). {INSTALL_HINT}"
-                ),
-            }
-=======
                 return _fail(
                     f"No text found in {filename} (scanned PDF). {e}"
                 )
@@ -659,7 +624,6 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
             return _fail(
                 f"No text found in {filename} (scanned PDF). {INSTALL_HINT}"
             )
->>>>>>> origin/main
     if not text.strip():
         return _fail(f"No text found in {filename}.")
 
@@ -709,12 +673,6 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         extractor,
     )
     _upload_texts[doc_id] = text
-<<<<<<< HEAD
-    # The on-disk index changed, so the cached retriever would keep
-    # serving the old vectors. Drop it; the next question reloads.
-    # (Caching contract, see caching.py.)
-    clear_cache()
-=======
     _latency_ms = (_time.perf_counter() - _started) * 1000
     record_upload(_latency_ms, ok=True)
     log_upload_event(
@@ -727,11 +685,10 @@ def _ingest_upload(filename: str, data: bytes, settings: Any, max_mb: float) -> 
         extractor=extractor,
         latency_ms=_latency_ms,
     )
->>>>>>> origin/main
     return {"ok": True, **doc}
 
 
-@app.post("/api/upload", dependencies=_auth)
+@app.post("/api/upload", dependencies=_rate_upload)
 async def upload(file: list[UploadFile] = File(...)) -> dict:
     """Upload one or more documents into the PERSISTENT knowledge base.
 
@@ -885,13 +842,8 @@ def summarize_document(doc_id: str) -> dict:
     return {"ok": True, "summary": summary}
 
 
-<<<<<<< HEAD
 @app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_rate_summarize)
-def summarize_document_stream(doc_id: str) -> StreamingResponse:
-=======
-@app.post("/api/documents/{doc_id}/summarize/stream", dependencies=_auth)
 async def summarize_document_stream(doc_id: str, request: Request) -> StreamingResponse:
->>>>>>> origin/main
     """SSE stream of summarize progress events, then a done event.
 
     Event payloads (see rag_demo.summarize.summarize_events):
@@ -1047,14 +999,11 @@ def delete_document(doc_id: str) -> dict:
         # If nothing remains, leave the (now empty) index files as-is;
         # the next upload will recreate the index.
     _upload_texts.pop(doc_id, None)
-<<<<<<< HEAD
-=======
     log_event(
         "document_delete",
         request_id=new_request_id(),
         doc_id=doc_id,
     )
->>>>>>> origin/main
     # chunks.json / the FAISS index changed on disk; drop the cached
     # retriever so the next question sees the deletion.
     clear_cache()

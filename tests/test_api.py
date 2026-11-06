@@ -215,8 +215,6 @@ def test_feedback_validation():
     assert r.json()["ok"] is False
 
 
-<<<<<<< HEAD
-=======
 # --- Structured logging + metrics (observability) ---
 
 import json as _json
@@ -403,7 +401,6 @@ def test_metrics_latency_summary_math():
         observability.reset_metrics()
     assert observability.get_metrics_snapshot()["questions"] == 0
 
->>>>>>> origin/main
 def _upload(client, filename="scan.pdf", content=b"%PDF-1.4 fake scanned bytes"):
     return client.post(
         "/api/upload",
@@ -472,8 +469,6 @@ def test_upload_scanned_pdf_ocr_failure_surfaces_cause():
     body = r.json()
     assert body["ok"] is False
     assert "tesseract" in body["error"]
-<<<<<<< HEAD
-=======
 
 
 # --- Cancel-on-disconnect for the streaming endpoints ---------------------
@@ -875,4 +870,3 @@ def test_upload_file_count_cap(monkeypatch):
     body = r.json()
     assert body["ok"] is False
     assert "max 2" in body["error"]
->>>>>>> origin/main
