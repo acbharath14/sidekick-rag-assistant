@@ -14,7 +14,6 @@ are not shared across workers. uvicorn runs one worker here, so one
 process is the whole deployment.
 """
 
-from __future__ import annotations
 
 import hashlib
 import hmac
@@ -203,3 +202,4 @@ def rate_limit(bucket: str):
             logger.exception("rate limiter failed open for bucket %s", bucket)
 
     return _check
+
