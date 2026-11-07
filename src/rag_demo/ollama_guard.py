@@ -36,7 +36,7 @@ import logging
 import re
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +405,9 @@ def run_with_timeout(fn, timeout: float, *, label: str = "request"):
         ex.shutdown(wait=False, cancel_futures=True)
 
 
-def iter_with_idle_timeout(iterator, idle_timeout: float, *, label: str = "stream"):
+def iter_with_idle_timeout(
+    iterator, idle_timeout: float, *, label: str = "stream", track: bool = True
+):
     """Yield from iterator, failing fast when it stalls.
 
     Pulls one item at a time, only when the consumer asks for it: no
@@ -416,12 +418,29 @@ def iter_with_idle_timeout(iterator, idle_timeout: float, *, label: str = "strea
     raises OllamaTimeoutError and abandons the worker thread, so a
     stalled stream cannot hang the SSE response forever. Producer
     errors propagate to the consumer unchanged.
+
+    ``track=False`` is for a producer that runs its own tracked calls,
+    which is map-reduce summarization: one tracked call per chunk plus
+    one for the reduce. Counting the wrapper as a call too made every
+    nested call start "behind" the wrapper, so each one logged a false
+    "Ollama busy" line and /api/health reported two calls in flight for
+    a single generation. With RAG_DEMO_OLLAMA_MAX_CONCURRENT=1 it was
+    worse than cosmetic: the wrapper held the only slot for the whole
+    stream while every nested call waited for it until its own call
+    timeout expired, so the summarize failed as busy on an idle server.
+    Chat, agent, and graph streams stream one generation directly and
+    keep the default, where the wrapper is that generation.
     """
 
     def _generate():
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        slot = (
+            track_call(label, acquire_timeout=idle_timeout)
+            if track
+            else nullcontext()
+        )
         try:
-            with track_call(label, acquire_timeout=idle_timeout):
+            with slot:
                 while True:
                     future = ex.submit(next, iterator)
                     try:

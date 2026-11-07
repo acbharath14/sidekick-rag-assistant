@@ -1216,6 +1216,58 @@ def test_ollama_tracker_reports_queue_state():
     assert snap["max_in_flight"] == 2
 
 
+def test_stream_wrapper_skips_tracking_for_self_tracked_producers(caplog):
+    """A stream whose producer opens its own tracked calls must not be
+    tracked as a call itself.
+
+    Counting the wrapper made every nested generation start "behind" it:
+    a false "Ollama busy" line per call and two calls in flight for what
+    is one generate. The summarize stream passes track=False for this.
+    """
+    from rag_demo.ollama_guard import (
+        iter_with_idle_timeout,
+        ollama_snapshot,
+        reset_ollama_tracker,
+        track_call,
+    )
+
+    def producer():
+        for i in range(3):
+            with track_call("summarize"):
+                assert ollama_snapshot()["in_flight"] == 1
+            yield {"type": "progress", "done": i + 1}
+
+    reset_ollama_tracker()
+    with caplog.at_level("WARNING"):
+        events = list(
+            iter_with_idle_timeout(
+                producer(), 5.0, label="summarize-stream", track=False
+            )
+        )
+    snap = ollama_snapshot()
+    assert len(events) == 3
+    assert snap["calls_total"] == 3, "only the producer's own calls are calls"
+    assert snap["max_in_flight"] == 1, "the wrapper must not hold a slot"
+    assert snap["queued_behind_total"] == 0
+    assert "Ollama busy" not in caplog.text
+
+
+def test_stream_wrapper_counts_one_call_by_default():
+    """The default still tracks the stream: chat, agent, and graph
+    streams stream one generation directly, so the wrapper is it."""
+    from rag_demo.ollama_guard import (
+        iter_with_idle_timeout,
+        ollama_snapshot,
+        reset_ollama_tracker,
+    )
+
+    reset_ollama_tracker()
+    assert len(list(iter_with_idle_timeout(iter(["a", "b"]), 5.0, label="x"))) == 2
+    snap = ollama_snapshot()
+    assert snap["calls_total"] == 1
+    assert snap["in_flight"] == 0
+
+
 def test_summarize_does_not_retry_timeout():
     """Summarize policy, shared everywhere now: timeouts go straight to
     the raw fallback instead of burning another full timeout on retry."""

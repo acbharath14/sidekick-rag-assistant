@@ -96,6 +96,50 @@ def test_short_doc_persistent_failure_message():
     assert "didn't complete" in out
 
 
+def test_summarize_stream_does_not_count_its_wrapper(monkeypatch):
+    """The SSE wrapper must not be tracked as a call of its own.
+
+    api.summarize_document_stream wraps summarize_events in
+    iter_with_idle_timeout(..., track=False). Tracking the wrapper made
+    every chunk call look queued behind it, and with the concurrency cap
+    at 1 it held the only slot its own calls needed, so a summarize on an
+    idle server failed as busy.
+    """
+    from rag_demo.ollama_guard import (
+        iter_with_idle_timeout,
+        ollama_snapshot,
+        reset_ollama_tracker,
+    )
+
+    text = "word " * 3200
+    n = _n_chunks(text)
+    fake = FakeLLM([])  # every call answers "default summary"
+    settings = SimpleNamespace(
+        summarize_parallel_map=False,
+        summarize_timeout_seconds=2.0,
+        llm_retry_attempts=1,
+        llm_retry_backoff_seconds=(0.0,),
+    )
+    monkeypatch.setenv("RAG_DEMO_OLLAMA_MAX_CONCURRENT", "1")
+    reset_ollama_tracker()
+    with patch("rag_demo.summarize.get_llm", return_value=fake):
+        events = list(
+            iter_with_idle_timeout(
+                summarize_events(text, settings),
+                5.0,
+                label="summarize-stream",
+                track=False,
+            )
+        )
+    assert events[0]["mode"] == "map_reduce"
+    assert events[-1]["type"] == "done"
+    assert "couldn't be summarized" not in events[-1]["summary"]
+    snap = ollama_snapshot()
+    assert snap["max_in_flight"] == 1
+    assert snap["queued_behind_total"] == 0
+    assert snap["calls_total"] == n + 1, "one call per chunk plus the reduce"
+
+
 def test_document_just_over_the_old_6k_ceiling_is_one_call():
     """Regression: a 6,385-char document (the OCR'd I-797) used to take
     two map calls plus a reduce; it now fits a single call."""

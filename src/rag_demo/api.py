@@ -941,6 +941,11 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
                     summarize_events(text, settings),
                     settings.stream_idle_timeout_seconds,
                     label="summarize-stream",
+                    # summarize_events tracks every chunk and reduce call
+                    # itself; a tracked wrapper would count the stream as
+                    # another call on top of them and, under a concurrency
+                    # cap of 1, hold the only slot its own calls need.
+                    track=False,
                 ),
                 request,
                 label="summarize",
