@@ -28,6 +28,16 @@ function formatDate(ts: number): string {
   });
 }
 
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 export default function DocumentDetail({
   doc,
   onBack,
@@ -42,14 +52,23 @@ export default function DocumentDetail({
   // percentage: single-call docs have no chunks to count, so they get the
   // spinner alone. The reduce stage keeps the last map percentage.
   const [summarizePercent, setSummarizePercent] = useState<number | null>(null);
+  // Wall time of the last successful summarize (click to done event),
+  // with the section count for map-reduce runs, so speed is visible in
+  // the UI and comparable across changes. Client-side timing: it covers
+  // the whole round trip, not just the server work.
+  const [summarizeDurationMs, setSummarizeDurationMs] = useState<number | null>(null);
+  const [summarizeSections, setSummarizeSections] = useState<number | null>(null);
   const [summarizeError, setSummarizeError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const handleSummarize = (): void => {
     if (summarizing) return;
+    const startedAt = Date.now();
     setSummarizing(true);
     setSummarizeError(null);
     setSummarizeProgress("Starting…");
+    setSummarizeDurationMs(null);
+    setSummarizeSections(null);
 
     const finish = (): void => {
       setSummarizing(false);
@@ -62,6 +81,7 @@ export default function DocumentDetail({
         // Single-call docs have no chunks to count: spinner only, no
         // percentage. Map-reduce starts at 0%.
         setSummarizePercent(event.mode === "map_reduce" ? 0 : null);
+        setSummarizeSections(event.mode === "map_reduce" ? event.total : null);
         setSummarizeProgress(
           event.mode === "single"
             ? "Summarizing…"
@@ -87,6 +107,7 @@ export default function DocumentDetail({
           );
         }
       } else if (event.type === "done") {
+        setSummarizeDurationMs(Date.now() - startedAt);
         setSummary(event.summary);
         onSummaryUpdated(event.summary);
         finish();
@@ -97,6 +118,7 @@ export default function DocumentDetail({
       onEvent,
       onError: (err) => {
         setSummarizeError(err.message);
+        setSummarizeDurationMs(null);
         finish();
       },
     });
@@ -192,6 +214,12 @@ export default function DocumentDetail({
               style={{ width: `${summarizePercent}%` }}
             />
           </div>
+        )}
+        {summarizeDurationMs !== null && (
+          <p className="doc-detail-hint">
+            Summarized in {formatDuration(summarizeDurationMs)}
+            {summarizeSections !== null && ` · ${summarizeSections} sections`}
+          </p>
         )}
       </section>
 
