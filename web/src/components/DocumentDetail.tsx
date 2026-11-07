@@ -38,6 +38,10 @@ export default function DocumentDetail({
   const [summary, setSummary] = useState<string | null>(doc.summary);
   const [summarizing, setSummarizing] = useState(false);
   const [summarizeProgress, setSummarizeProgress] = useState<string | null>(null);
+  // Percentage shown next to the spinner, map-reduce only. Null means no
+  // percentage: single-call docs have no chunks to count, so they get the
+  // spinner alone. The reduce stage keeps the last map percentage.
+  const [summarizePercent, setSummarizePercent] = useState<number | null>(null);
   const [summarizeError, setSummarizeError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -50,10 +54,14 @@ export default function DocumentDetail({
     const finish = (): void => {
       setSummarizing(false);
       setSummarizeProgress(null);
+      setSummarizePercent(null);
     };
 
     const onEvent = (event: SummarizeEvent): void => {
       if (event.type === "start") {
+        // Single-call docs have no chunks to count: spinner only, no
+        // percentage. Map-reduce starts at 0%.
+        setSummarizePercent(event.mode === "map_reduce" ? 0 : null);
         setSummarizeProgress(
           event.mode === "single"
             ? "Summarizing…"
@@ -61,8 +69,19 @@ export default function DocumentDetail({
         );
       } else if (event.type === "progress") {
         if (event.stage === "reduce") {
+          // Keep the last map percentage while combining: claiming 100%
+          // here would be wrong, the reduce call is still running.
           setSummarizeProgress("Combining section summaries…");
         } else {
+          if (
+            typeof event.done === "number" &&
+            typeof event.total === "number" &&
+            event.total > 0
+          ) {
+            setSummarizePercent(
+              Math.round((event.done / event.total) * 100),
+            );
+          }
           setSummarizeProgress(
             `Summarizing section ${event.done}/${event.total}…`,
           );
@@ -151,6 +170,7 @@ export default function DocumentDetail({
             <>
               <span className="summarize-spinner" aria-hidden="true" />
               {summarizeProgress ?? (summary ? "Regenerating…" : "Summarizing…")}
+              {summarizePercent !== null && ` ${summarizePercent}%`}
             </>
           ) : summary ? (
             "↻ Regenerate summary"
@@ -158,6 +178,21 @@ export default function DocumentDetail({
             "📝 Summarize"
           )}
         </button>
+        {summarizing && summarizePercent !== null && (
+          <div
+            className="summarize-progress-track"
+            role="progressbar"
+            aria-valuenow={summarizePercent}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Summarize progress"
+          >
+            <div
+              className="summarize-progress-fill"
+              style={{ width: `${summarizePercent}%` }}
+            />
+          </div>
+        )}
       </section>
 
       <div className="doc-detail-actions">
