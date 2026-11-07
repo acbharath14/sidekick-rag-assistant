@@ -62,6 +62,35 @@ RAW_FALLBACK_CHARS = 2000
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (5, 15)
 
+
+def rebuild_text_from_chunks(chunks: list[str]) -> str:
+    """Rebuild a document's full text from its ingestion chunks.
+
+    Ingestion splits with chunk_size=500, chunk_overlap=50, so consecutive
+    chunks share up to 50 characters. Keep the first chunk whole; for each
+    later chunk, drop the longest prefix (at most 50 chars) that equals the
+    suffix of the text accumulated so far, then append the rest. A chunk
+    with no matching prefix is appended whole, so non-overlapping chunks
+    just concatenate. Used by the API layer to recover a document's text
+    after a server restart, when the in-memory copy is gone but the
+    persisted chunks survive.
+    """
+    if not chunks:
+        return ""
+    text = chunks[0]
+    for chunk in chunks[1:]:
+        if not chunk:
+            continue
+        drop = 0
+        max_overlap = min(50, len(chunk), len(text))
+        for n in range(max_overlap, 0, -1):
+            if text.endswith(chunk[:n]):
+                drop = n
+                break
+        text += chunk[drop:]
+    return text
+
+
 SUMMARY_PROMPT = """Summarize the document below. Lead with the key points, then list any dates, deadlines, owners, or numbers named. Be concise.
 
 Document:
