@@ -18,6 +18,12 @@ Streaming: `summarize_events` yields progress events for SSE consumers
 (start / progress / done / error). `summarize` is a thin wrapper that runs
 the same generator to completion, so both paths share one code path.
 
+Parallel map (opt-in, RAG_DEMO_SUMMARIZE_PARALLEL_MAP=1): the map calls
+run concurrently instead of one at a time. Same prompts, same model,
+same reduce input order, so the summary is unchanged; only the wall
+time can change. Default off: whether it helps depends on the Ollama
+server's parallel-sequence capacity on the target hardware.
+
 Timeouts and retries go through rag_demo.ollama_guard and Settings:
 the per-call deadline is settings.summarize_timeout_seconds (600s,
 unchanged), attempts and backoff are settings.llm_retry_attempts and
@@ -196,6 +202,73 @@ def _reduce_summaries(
     return _reduce_summaries(merged, llm, timeout, attempts, backoff)
 
 
+def _summarize_one_chunk(
+    llm,
+    chunk: str,
+    timeout: float | None = None,
+    attempts: int = RETRY_ATTEMPTS,
+    backoff: tuple[float, ...] = RETRY_BACKOFF_SECONDS,
+) -> tuple[str, bool]:
+    """Summarize one map chunk. Returns (partial, was_raw_fallback).
+
+    Shared by the sequential and parallel map paths, so both run the
+    same retries and the same raw fallback: a chunk that still fails is
+    passed through raw (truncated) instead of being silently dropped.
+    """
+    p, status = _invoke_with_retry(
+        llm,
+        MAP_PROMPT.format(chunk=chunk),
+        timeout,
+        attempts,
+        backoff,
+        run_name="summarize-map",
+    )
+    _record_llm_outcome(status)
+    if p:
+        return p, False
+    return RAW_SECTION_TEMPLATE.format(chunk=chunk[:RAW_FALLBACK_CHARS]), True
+
+
+def _run_map_parallel(
+    llm,
+    chunks: list[str],
+    timeout: float | None = None,
+    attempts: int = RETRY_ATTEMPTS,
+    backoff: tuple[float, ...] = RETRY_BACKOFF_SECONDS,
+):
+    """Run the map calls concurrently. Yields progress events; returns
+    (partials in chunk order, raw_fallback_count) via StopIteration.
+
+    The map calls are independent (same prompt shape, same model), so
+    running them together changes only the wall time, not the summary:
+    each result is placed back at its chunk index, and the reduce step
+    sees the same ordered list the sequential loop would have built.
+    Workers are capped at 4: beyond that a CPU-only Ollama server just
+    queues the extra sequences. A failure inside a worker propagates
+    like a sequential failure (the outer generator turns it into an
+    error event).
+    """
+    import concurrent.futures
+
+    partials: list[str | None] = [None] * len(chunks)
+    raw_fallbacks = 0
+    done = 0
+    workers = min(len(chunks), 4)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {
+            ex.submit(_summarize_one_chunk, llm, c, timeout, attempts, backoff): i
+            for i, c in enumerate(chunks)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            i = futures[fut]
+            partial, was_raw = fut.result()
+            partials[i] = partial
+            raw_fallbacks += 1 if was_raw else 0
+            done += 1
+            yield {"type": "progress", "done": done, "total": len(chunks), "stage": "map"}
+    return [p if p is not None else "" for p in partials], raw_fallbacks
+
+
 def summarize_events(text: str, settings: Settings | None = None):
     """Yield progress events for SSE streaming.
 
@@ -236,24 +309,17 @@ def summarize_events(text: str, settings: Settings | None = None):
         yield {"type": "start", "mode": "map_reduce", "total": len(chunks)}
         partials = []
         raw_fallbacks = 0
-        for i, c in enumerate(chunks, 1):
-            p, status = _invoke_with_retry(
-                llm,
-                MAP_PROMPT.format(chunk=c),
-                timeout,
-                attempts,
-                backoff,
-                run_name="summarize-map",
+        parallel = getattr(settings, "summarize_parallel_map", False)
+        if parallel and len(chunks) > 1:
+            partials, raw_fallbacks = yield from _run_map_parallel(
+                llm, chunks, timeout, attempts, backoff
             )
-            _record_llm_outcome(status)
-            if p:
+        else:
+            for i, c in enumerate(chunks, 1):
+                p, was_raw = _summarize_one_chunk(llm, c, timeout, attempts, backoff)
                 partials.append(p)
-            else:
-                # Never silently drop content: the reduce step sees the raw
-                # section instead of nothing.
-                partials.append(RAW_SECTION_TEMPLATE.format(chunk=c[:RAW_FALLBACK_CHARS]))
-                raw_fallbacks += 1
-            yield {"type": "progress", "done": i, "total": len(chunks), "stage": "map"}
+                raw_fallbacks += 1 if was_raw else 0
+                yield {"type": "progress", "done": i, "total": len(chunks), "stage": "map"}
         yield {"type": "progress", "stage": "reduce"}
         summary = _reduce_summaries(
             partials,

@@ -200,3 +200,77 @@ def test_summarize_raises_on_error_event():
     with patch("rag_demo.summarize.get_llm", side_effect=RuntimeError("no model")):
         with pytest.raises(RuntimeError, match="no model"):
             summarize("hello", settings=object())
+
+
+class ChunkEchoLLM:
+    """Fake that derives its reply from the chunk in the prompt, so the
+    reply is deterministic per chunk no matter which order concurrent
+    calls complete in."""
+
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        if "Section:\n" in prompt:
+            chunk = prompt.split("Section:\n", 1)[1]
+            return SimpleNamespace(content=f"SEC[{chunk[:24]}]")
+        return SimpleNamespace(content="Combined summary.")
+
+
+def _distinct_text():
+    """Text that splits into distinct chunks (each section differs)."""
+    parts = [f"Section {i} alpha beta gamma. " * 60 for i in range(4)]
+    return "\n\n".join(parts)
+
+
+def test_parallel_map_matches_sequential():
+    text = _distinct_text()
+    n = _n_chunks(text)
+    assert n > 1
+    with patch("time.sleep"):
+        seq = _collect(text, ChunkEchoLLM())
+        with patch("rag_demo.summarize.get_llm", return_value=ChunkEchoLLM()):
+            par = list(
+                summarize_events(
+                    text, settings=SimpleNamespace(summarize_parallel_map=True)
+                )
+            )
+    # Same prompts, same model, same reduce input order: the whole event
+    # stream is identical. Only the execution overlaps.
+    assert par == seq
+    assert seq[0] == {"type": "start", "mode": "map_reduce", "total": n}
+    map_events = [e for e in seq if e.get("stage") == "map"]
+    assert [e["done"] for e in map_events] == list(range(1, n + 1))
+    assert {"type": "progress", "stage": "reduce"} in seq
+    assert seq[-1] == {"type": "done", "summary": "Combined summary."}
+
+
+def test_parallel_map_raw_fallback_preserved():
+    text = _distinct_text()
+    n = _n_chunks(text)
+    assert n > 1
+
+    class FlakyEchoLLM(ChunkEchoLLM):
+        def invoke(self, prompt):
+            self.calls.append(prompt)
+            if "Section:\n" in prompt and "Section 2" in prompt:
+                raise RuntimeError("chunk down")
+            if "Section:\n" in prompt:
+                chunk = prompt.split("Section:\n", 1)[1]
+                return SimpleNamespace(content=f"SEC[{chunk[:24]}]")
+            return SimpleNamespace(content="Combined summary.")
+
+    fake = FlakyEchoLLM()
+    with patch("time.sleep"):
+        with patch("rag_demo.summarize.get_llm", return_value=fake):
+            events = list(
+                summarize_events(
+                    text, settings=SimpleNamespace(summarize_parallel_map=True)
+                )
+            )
+    assert events[-1]["type"] == "done"
+    assert f"1 of {n} sections couldn't be summarized" in events[-1]["summary"]
+    reduce_prompt = fake.calls[-1]
+    assert "[Unprocessed section" in reduce_prompt
+    assert "Section 2" in reduce_prompt  # failed content preserved, not dropped
