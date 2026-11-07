@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rag_demo.summarize import (  # noqa: E402
     REDUCE_LIMIT_CHARS,
+    SINGLE_CALL_CHARS,
     _invoke,
     _invoke_with_retry,
     _reduce_summaries,
@@ -95,6 +96,18 @@ def test_short_doc_persistent_failure_message():
     assert "didn't complete" in out
 
 
+def test_document_just_over_the_old_6k_ceiling_is_one_call():
+    """Regression: a 6,385-char document (the OCR'd I-797) used to take
+    two map calls plus a reduce; it now fits a single call."""
+    text = ("Eleven months from entry. " * 300)[:6385]
+    assert 6000 < len(text) <= SINGLE_CALL_CHARS
+    fake = FakeLLM([("ok", "One call.")])
+    events = _collect(text, fake)
+    assert events[0] == {"type": "start", "mode": "single", "total": 1}
+    assert events[-1] == {"type": "done", "summary": "One call."}
+    assert len(fake.calls) == 1
+
+
 def _n_chunks(text):
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     splitter = RecursiveCharacterTextSplitter(chunk_size=4000, chunk_overlap=200)
@@ -102,7 +115,7 @@ def _n_chunks(text):
 
 
 def test_long_doc_map_reduce_happy_path():
-    text = "word " * 2000  # ~10k chars -> multiple ~4k chunks
+    text = "word " * 3200  # ~16k chars -> several ~4k chunks
     n = _n_chunks(text)
     assert n > 1
     fake = FakeLLM([("ok", f"bullets {i}") for i in range(n)] + [("echo_len", None)])
@@ -113,8 +126,10 @@ def test_long_doc_map_reduce_happy_path():
 
 
 def test_failed_chunk_falls_back_to_raw_not_dropped():
-    text = ("aaa " * 975) + ("UNIQUE-CHUNK2-MARKER " * 185) + ("bbb " * 975)
-    assert len(text) > 6000
+    # The marker block begins in the second chunk, so a raw fallback
+    # there must carry it into the reduce input.
+    text = ("aaa " * 1300) + ("UNIQUE-CHUNK2-MARKER " * 185) + ("bbb " * 1300)
+    assert len(text) > SINGLE_CALL_CHARS
     n = _n_chunks(text)
     assert n > 1
     # Chunk 1 ok; chunk 2 fails all 3 attempts; remaining chunks ok; then reduce.
@@ -164,7 +179,7 @@ def test_events_single_call_sequence():
 
 
 def test_events_map_reduce_sequence():
-    text = "word " * 2000
+    text = "word " * 3200  # over the single-call ceiling -> map-reduce
     n = _n_chunks(text)
     assert n > 1
     fake = FakeLLM([("ok", f"bullets {i}") for i in range(n)] + [("ok", "Final.")])
@@ -186,7 +201,7 @@ def test_events_error_when_llm_unavailable():
 
 
 def test_summarize_matches_event_stream():
-    text = "word " * 2000
+    text = "word " * 3200  # over the single-call ceiling -> map-reduce
     n = _n_chunks(text)
     script = [("ok", f"bullets {i}") for i in range(n)] + [("ok", "Final.")]
     with patch("time.sleep"):
@@ -221,7 +236,7 @@ class ChunkEchoLLM:
 
 def _distinct_text():
     """Text that splits into distinct chunks (each section differs)."""
-    parts = [f"Section {i} alpha beta gamma. " * 60 for i in range(4)]
+    parts = [f"Section {i} alpha beta gamma. " * 120 for i in range(4)]
     return "\n\n".join(parts)
 
 
@@ -255,7 +270,7 @@ def test_parallel_map_raw_fallback_preserved():
     class FlakyEchoLLM(ChunkEchoLLM):
         def invoke(self, prompt):
             self.calls.append(prompt)
-            if "Section:\n" in prompt and "Section 2" in prompt:
+            if "Section:\n" in prompt and "Section 0" in prompt:
                 raise RuntimeError("chunk down")
             if "Section:\n" in prompt:
                 chunk = prompt.split("Section:\n", 1)[1]
@@ -274,7 +289,7 @@ def test_parallel_map_raw_fallback_preserved():
     assert f"1 of {n} sections couldn't be summarized" in events[-1]["summary"]
     reduce_prompt = fake.calls[-1]
     assert "[Unprocessed section" in reduce_prompt
-    assert "Section 2" in reduce_prompt  # failed content preserved, not dropped
+    assert "Section 0" in reduce_prompt  # failed content preserved, not dropped
 
 
 def test_rebuild_text_overlapping_chunks():

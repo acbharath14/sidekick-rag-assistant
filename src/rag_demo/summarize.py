@@ -55,9 +55,16 @@ def _record_llm_outcome(status: str) -> None:
     elif status == "error":
         record_ollama_error()
 
-SINGLE_CALL_CHARS = 6000
 CHUNK_CHARS = 4000
+#: The reduce step already hands this much text to a single prompt, so a
+#: plain single-call summary is safe at the same size. Keeping the
+#: single-call ceiling here removes the old cliff at 6,000 characters,
+#: where a 6,001-char document paid for two map calls plus a reduce
+#: (three sequential LLM calls) while a 5,999-char one paid for a single
+#: call. A 12,000-char prompt is ~3k tokens, the same envelope the
+#: reduce step has always used.
 REDUCE_LIMIT_CHARS = 12000
+SINGLE_CALL_CHARS = REDUCE_LIMIT_CHARS
 RAW_FALLBACK_CHARS = 2000
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (5, 15)

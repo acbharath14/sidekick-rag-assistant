@@ -401,9 +401,9 @@ def test_summarize_after_restart_recovers_text_from_saved_chunks(
                        str(tmp_path / "conversations.db"))
     text = "\n\n".join(
         f"Paragraph {i}. The retention period is {i} days."
-        for i in range(1, 160)
+        for i in range(1, 300)
     )
-    assert len(text) > 6000  # long enough for the map-reduce path
+    assert len(text) > 12_000  # long enough for the map-reduce path
     r = client.post("/api/upload", files={
         "file": ("policy.txt", text.encode(), "text/plain"),
     })
