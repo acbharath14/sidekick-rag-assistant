@@ -15,6 +15,7 @@ from rag_demo.summarize import (  # noqa: E402
     _invoke,
     _invoke_with_retry,
     _reduce_summaries,
+    rebuild_text_from_chunks,
     summarize,
     summarize_events,
 )
@@ -274,3 +275,35 @@ def test_parallel_map_raw_fallback_preserved():
     reduce_prompt = fake.calls[-1]
     assert "[Unprocessed section" in reduce_prompt
     assert "Section 2" in reduce_prompt  # failed content preserved, not dropped
+
+
+def test_rebuild_text_overlapping_chunks():
+    # Ingestion overlap is 50 chars: the second chunk repeats the first
+    # chunk's tail, so the shared run appears once in the rebuilt text.
+    first = "SECTION ONE. " + "abcdefghij" * 10
+    second = "abcdefghij" * 5 + " SECTION TWO."
+    out = rebuild_text_from_chunks([first, second])
+    assert out == first + " SECTION TWO."
+    assert out.count("abcdefghij") == 10  # shared 50 chars counted once
+
+
+def test_rebuild_text_partial_overlap():
+    first = "The first part ends with hello world"
+    second = "world continues here"
+    assert rebuild_text_from_chunks([first, second]) == (
+        "The first part ends with hello world continues here"
+    )
+
+
+def test_rebuild_text_non_overlapping_chunks():
+    first = "The quick brown fox. "
+    second = "Jumps over the lazy dog."
+    assert rebuild_text_from_chunks([first, second]) == first + second
+
+
+def test_rebuild_text_single_chunk():
+    assert rebuild_text_from_chunks(["only one"]) == "only one"
+
+
+def test_rebuild_text_empty_list():
+    assert rebuild_text_from_chunks([]) == ""

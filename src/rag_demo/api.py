@@ -60,7 +60,7 @@ from pydantic import BaseModel
 from .audit import log_feedback
 from .caching import clear_cache
 from .chain import Answer, ask, stream_ask
-from .config import get_embeddings, get_settings
+from .config import Settings, get_embeddings, get_settings
 from .ollama_guard import (
     OllamaTimeoutError,
     is_transient_error,
@@ -82,7 +82,7 @@ from .observability import (
     truncate_preview,
 )
 from .rate_limit import rate_limit
-from .summarize import SINGLE_CALL_CHARS
+from .summarize import SINGLE_CALL_CHARS, rebuild_text_from_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,41 @@ app = FastAPI(title="Sidekick RAG API")
 # In-memory text cache for on-demand summarization, keyed by doc_id.
 # The vectors themselves live in the persistent FAISS index on disk.
 _upload_texts: dict[str, str] = {}
+
+
+def _document_text(doc_id: str, settings: Settings) -> str | None:
+    """Full extracted text for a document, for on-demand summarization.
+
+    Fast path: the in-memory cache filled at upload time. After a server
+    restart the cache is empty; then rebuild the text from the document's
+    persisted chunks in chunks.json and refill the cache, so Regenerate
+    summary works for documents uploaded before the restart. Returns None
+    when the text is available nowhere (the caller keeps its existing
+    "no longer in memory" error).
+    """
+    text = _upload_texts.get(doc_id)
+    if text:
+        return text
+    chunks_path = settings.index_dir / "chunks.json"
+    try:
+        entries = json.loads(chunks_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    source = f"upload:{doc_id}"
+    chunks = [
+        entry["text"]
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("source") == source
+        and entry.get("text")
+    ]
+    if not chunks:
+        return None
+    text = rebuild_text_from_chunks(chunks)
+    _upload_texts[doc_id] = text
+    return text
 
 app.add_middleware(
     CORSMiddleware,
@@ -757,7 +792,7 @@ def get_document(doc_id: str) -> dict:
     if not doc:
         return {"ok": False, "error": "Document not found."}
     if not doc["summary"]:
-        text = _upload_texts.get(doc_id)
+        text = _document_text(doc_id, get_settings())
         if text:
             from .summarize import summarize
 
@@ -789,7 +824,8 @@ def summarize_document(doc_id: str) -> dict:
             doc_id=doc_id,
         )
         return {"ok": False, "error": "Document not found."}
-    text = _upload_texts.get(doc_id)
+    settings = get_settings()
+    text = _document_text(doc_id, settings)
     if not text:
         log_error_event(
             request_id=request_id,
@@ -806,7 +842,6 @@ def summarize_document(doc_id: str) -> dict:
         }
     from .summarize import summarize
 
-    settings = get_settings()
     try:
         summary = run_with_timeout(
             lambda: summarize(text, settings),
@@ -878,7 +913,8 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
         )
         return StreamingResponse(_error_event("Document not found."),
                                  media_type="text/event-stream")
-    text = _upload_texts.get(doc_id)
+    settings = get_settings()
+    text = _document_text(doc_id, settings)
     if not text:
         log_error_event(
             request_id=request_id,
@@ -897,7 +933,6 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
     async def events():
         from .summarize import summarize_events
 
-        settings = get_settings()
         final: str | None = None
         mode = "single" if len(text) <= SINGLE_CALL_CHARS else "map_reduce"
         try:
