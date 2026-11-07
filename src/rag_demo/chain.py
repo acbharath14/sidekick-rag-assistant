@@ -277,6 +277,23 @@ def _generation_hits(
     return hits
 
 
+def build_prompt(settings: Settings | None = None) -> ChatPromptTemplate:
+    """The ask prompt template, shared by the LCEL chain (build_chain)
+    and the LangGraph wrap (graph.py) so both generate from the same
+    prompt."""
+    settings = settings or get_settings()
+    system = SYSTEM_HYBRID if settings.hybrid_fallback else SYSTEM
+    return ChatPromptTemplate.from_messages(
+        [
+            ("system", system),
+            (
+                "human",
+                "Context:\n{context}\n\nQuestion: {question}\n\nAnswer concisely with citations.",
+            ),
+        ]
+    )
+
+
 def build_chain(
     settings: Settings | None = None,
     retriever: Retriever | None = None,
@@ -310,16 +327,7 @@ def build_chain(
     groups = user_groups if user_groups is not None else settings.user_groups
     # Document-scoped chat: only retrieve chunks from this document's source.
     source_filter = f"upload:{document_id}" if document_id else None
-    system = SYSTEM_HYBRID if settings.hybrid_fallback else SYSTEM
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system),
-            (
-                "human",
-                "Context:\n{context}\n\nQuestion: {question}\n\nAnswer concisely with citations.",
-            ),
-        ]
-    )
+    prompt = build_prompt(settings)
     def _retrieve(q: str) -> list[Hit]:
         # Time the retrieval inside the chain so ask()/stream_ask()
         # can report retrieve_ms separately from generate_ms. Rerank
@@ -387,6 +395,21 @@ def ask(
     Opens one Langfuse trace per question (a no-op when tracing is off).
     """
     settings = settings or get_settings()
+    if settings.use_langgraph:
+        # Phase 2: the LangGraph wrap owns its own question_span, so
+        # dispatch before opening one here (never double-wrap).
+        from .graph import ask_via_graph
+
+        return ask_via_graph(
+            question,
+            settings=settings,
+            history=history,
+            user_groups=user_groups,
+            retriever=retriever,
+            document_id=document_id,
+            request_id=request_id,
+            endpoint=endpoint,
+        )
     metadata = {"model": settings.ollama_model}
     if document_id:
         metadata["document_id"] = document_id
@@ -613,6 +636,22 @@ def stream_ask(
     disconnects.
     """
     settings = settings or get_settings()
+    if settings.use_langgraph:
+        # Phase 2: the LangGraph wrap owns its own question_span, so
+        # dispatch before opening one here (never double-wrap).
+        from .graph import stream_ask_via_graph
+
+        yield from stream_ask_via_graph(
+            question,
+            settings=settings,
+            history=history,
+            user_groups=user_groups,
+            retriever=retriever,
+            document_id=document_id,
+            request_id=request_id,
+            endpoint=endpoint,
+        )
+        return
     metadata = {"model": settings.ollama_model}
     if document_id:
         metadata["document_id"] = document_id
