@@ -386,6 +386,72 @@ def test_upload_and_summarize_move_metrics_and_log(tmp_path, monkeypatch,
     assert summarizes[-1]["mode"] == "single"
 
 
+def test_summarize_after_restart_recovers_text_from_saved_chunks(
+    tmp_path, monkeypatch
+):
+    """PR #68: Regenerate after a restart rebuilds the text from chunks.json.
+
+    The in-memory text cache is per process; the persisted chunks are not.
+    Clear the cache to simulate a restart, then regenerate both synchronously
+    and over SSE: both must answer from the rebuilt text instead of the old
+    "Document text no longer in memory (restarted since upload)" error.
+    """
+    monkeypatch.setenv("RAG_DEMO_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("RAG_DEMO_CONVERSATIONS_DB",
+                       str(tmp_path / "conversations.db"))
+    text = "\n\n".join(
+        f"Paragraph {i}. The retention period is {i} days."
+        for i in range(1, 160)
+    )
+    assert len(text) > 6000  # long enough for the map-reduce path
+    r = client.post("/api/upload", files={
+        "file": ("policy.txt", text.encode(), "text/plain"),
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True, body
+    doc_id = body["id"]
+    # A second document proves its chunks never leak into this rebuild.
+    other = client.post("/api/upload", files={
+        "file": ("other.txt", b"UNRELATED-OTHER-DOC-MARKER", "text/plain"),
+    })
+    other_id = other.json()["id"]
+    try:
+        api._upload_texts.pop(doc_id, None)  # simulate the restart
+        api._upload_texts.pop(other_id, None)
+        recovered = api._document_text(doc_id, api.get_settings())
+        assert recovered is not None
+        assert "Paragraph 1. " in recovered
+        assert "Paragraph 159. " in recovered
+        assert "UNRELATED-OTHER-DOC-MARKER" not in recovered
+        # Overlap trimming is a heuristic (up to 50 chars per boundary),
+        # so allow a small length delta but never a truncated document.
+        assert abs(len(recovered) - len(text)) <= len(text) * 0.02
+
+        r = client.post(f"/api/documents/{doc_id}/summarize")
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True, r.json()
+        assert r.json()["summary"]
+        assert api._upload_texts.get(doc_id)  # cache refilled by the rebuild
+
+        api._upload_texts.pop(doc_id, None)
+        with client.stream(
+            "POST", f"/api/documents/{doc_id}/summarize/stream"
+        ) as sr:
+            events = [
+                json.loads(line[len("data: "):])
+                for line in sr.iter_lines()
+                if line.startswith("data: ")
+            ]
+        assert any(e.get("type") == "done" for e in events), events
+        assert not any(e.get("type") == "error" for e in events), events
+    finally:
+        api._upload_texts.pop(doc_id, None)
+        api._upload_texts.pop(other_id, None)
+        client.delete(f"/api/documents/{doc_id}")
+        client.delete(f"/api/documents/{other_id}")
+
+
 def test_metrics_latency_summary_math():
     # Unit check of the mean/p95 computation, isolated from the shared
     # counters (reset before and after so other tests are unaffected).
