@@ -379,6 +379,14 @@ returning 500s. The effective limits are visible at `GET /api/config`.
   and are searchable in every conversation.
 - **Episodic memory** still uses LanceDB, unchanged — it records past
   Q&As for semantic recall across sessions.
+- **LangGraph wrap (optional):** the ask chain also exists as a
+  LangGraph `StateGraph` in `src/rag_demo/graph.py`, with the same steps
+  in the same order (episodic, rewrite, retrieve, generate) and the same
+  behavior. It is off by default. Set `RAG_DEMO_USE_LANGGRAPH=1` to
+  route `ask()` and `stream_ask()` through the graph instead of the
+  LCEL chain. The API, CLI, and evals need no changes. The graph adds
+  no new capabilities: no conditional retrieval, no self-correcting
+  loops, no tool calls. Those are design decisions for a later review.
 
 ### Langfuse tracing (optional)
 
