@@ -95,6 +95,16 @@ class Settings:
     summarize_timeout_seconds: float = field(
         default_factory=lambda: float(os.environ.get("RAG_DEMO_SUMMARY_TIMEOUT", "600"))
     )
+    # RAG_DEMO_SUMMARIZE_PARALLEL_MAP: run the map-reduce map calls
+    # concurrently (1 = on). Default off: the map loop stays sequential.
+    # The prompts, the model, and the reduce step are identical either
+    # way, so the summary is the same; only the wall time can change.
+    # Whether it actually helps depends on the Ollama server (its
+    # parallel-sequence capacity on CPU-only hardware), so measure it
+    # on the target machine before turning it on.
+    summarize_parallel_map: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_SUMMARIZE_PARALLEL_MAP", "0") == "1"
+    )
     # RAG_DEMO_SUMMARY_REQUEST_TIMEOUT: deadline for one sync summarize
     # request (seconds). Default 0 means disabled: map-reduce total time
     # is N chunks times the per-call deadline by design, so a single
