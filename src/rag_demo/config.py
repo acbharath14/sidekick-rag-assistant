@@ -161,6 +161,14 @@ class Settings:
     hybrid_fallback: bool = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_HYBRID", "1") == "1"
     )
+    # LangGraph migration (Phase 2): route ask()/stream_ask() through the
+    # StateGraph in rag_demo/graph.py instead of the LCEL chain in
+    # chain.py. Same steps, same behavior; off by default until the
+    # graph is verified on the iMac.
+    use_langgraph: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_USE_LANGGRAPH", "0")
+        == "1"
+    )
     # Agentic loop budget (Phase 2, S3): iteration cap + wall-clock cap.
     # The iteration cap preserves the old MAX_ITERATIONS default (4).
     # The wall-clock cap is generous (5 min, matching the LLM timeout) so

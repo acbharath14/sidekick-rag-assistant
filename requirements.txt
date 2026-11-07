@@ -2,6 +2,7 @@ langchain>=0.3
 langchain-community>=0.3
 langchain-ollama>=0.2
 langchain-huggingface>=0.1
+langgraph>=1.2  # Phase 2: StateGraph wrap of the ask chain (graph.py)
 faiss-cpu>=1.8
 lancedb>=0.10  # episodic (conversational) memory — vector + metadata in one table
 boto3>=1.28  # optional: AWS S3 enterprise connector (RAG_DEMO_AWS_S3_BUCKET)
