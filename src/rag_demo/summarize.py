@@ -314,7 +314,23 @@ def summarize_events(text: str, settings: Settings | None = None):
       {"type": "progress", "stage": "reduce"}
       {"type": "done", "summary": "..."}
       {"type": "error", "error": "..."}
+
+    Opens one ``summarize-document`` span (a no-op when tracing is off),
+    so the LLM calls nest under a root with the document size as input
+    and the summary as output instead of arriving as loose traces.
     """
+    settings = settings or get_settings()
+    metadata = {"model": getattr(settings, "ollama_model", None)}
+    with tracing.span(
+        "summarize-document",
+        input={"chars": len(text)},
+        metadata={k: v for k, v in metadata.items() if v},
+        tags=("feature:summarize",),
+    ) as obs:
+        yield from _summarize_events_impl(text, settings, obs)
+
+
+def _summarize_events_impl(text: str, settings: Settings, obs=None):
     try:
         settings = settings or get_settings()
         # Tests pass a bare object() as settings, so read through getattr
@@ -335,6 +351,7 @@ def summarize_events(text: str, settings: Settings | None = None):
             )
             _record_llm_outcome(status)
             summary = result or "Summary didn't complete — the model may be overloaded. Try again."
+            tracing.set_output(obs, summary)
             yield {"type": "done", "summary": summary}
             return
         splitter = RecursiveCharacterTextSplitter(
@@ -371,6 +388,7 @@ def summarize_events(text: str, settings: Settings | None = None):
                 f"\n\n_Note: {raw_fallbacks} of {len(chunks)} sections couldn't be "
                 "summarized in time and were included unprocessed._"
             )
+        tracing.set_output(obs, summary)
         yield {"type": "done", "summary": summary}
     except Exception as e:
         yield {"type": "error", "error": f"{type(e).__name__}: {e}"}

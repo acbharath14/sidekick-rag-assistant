@@ -55,6 +55,65 @@ def test_spans_are_noop_when_disabled(monkeypatch):
         assert span is None
 
 
+def test_question_span_accepts_trace_context_when_disabled(monkeypatch):
+    """session_id/user_id/tags are optional extras: off means a no-op,
+    not a TypeError."""
+    _clear_langfuse_env(monkeypatch)
+    with tracing.question_span(
+        "what is this?", session_id="conv-1", user_id="u-1", tags=("feature:chat",)
+    ) as span:
+        assert span is None
+
+
+def test_span_accepts_type_input_and_tags_when_disabled(monkeypatch):
+    _clear_langfuse_env(monkeypatch)
+    with tracing.span(
+        "rerank", as_type="retriever", input={"candidates": 3}, tags=("feature:chat",)
+    ) as span:
+        assert span is None
+
+
+def test_set_output_flush_and_shutdown_are_safe_without_tracing(monkeypatch):
+    _clear_langfuse_env(monkeypatch)
+    tracing.set_output(None, "answer")  # no observation to update
+    tracing.set_output(None, None)
+    tracing.flush()
+    tracing.shutdown()
+
+
+def test_ask_accepts_session_id(monkeypatch):
+    """The chat path threads the conversation id through as session_id
+    without changing the answer."""
+    _clear_langfuse_env(monkeypatch)
+    from rag_demo.chain import ask
+    from rag_demo.config import get_settings
+
+    answer = ask("What is this?", settings=get_settings(), session_id="conv-1")
+    assert answer.text
+
+
+def test_stream_ask_accepts_session_id(monkeypatch):
+    _clear_langfuse_env(monkeypatch)
+    from rag_demo.chain import stream_ask
+    from rag_demo.config import get_settings
+
+    events = list(
+        stream_ask("What is this?", settings=get_settings(), session_id="conv-1")
+    )
+    assert any("answer" in event for event in events)
+
+
+def test_summarize_still_emits_start_and_done(monkeypatch):
+    """The summarize root span wraps the same event stream as before."""
+    _clear_langfuse_env(monkeypatch)
+    from rag_demo.config import get_settings
+    from rag_demo.summarize import summarize_events
+
+    events = list(summarize_events("short text", get_settings()))
+    assert events[0]["type"] == "start"
+    assert events[-1]["type"] == "done"
+
+
 def test_invoke_llm_without_tracing_calls_plain_invoke(monkeypatch):
     """Hand-rolled fakes define invoke(prompt) with no config kwarg;
     invoke_llm must not pass one when tracing is off."""

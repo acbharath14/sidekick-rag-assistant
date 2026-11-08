@@ -372,6 +372,8 @@ def chat(req: ChatRequest) -> dict:
                 document_id=_document_exists(req.document_id),
                 request_id=request_id,
                 endpoint="/api/chat",
+                # Groups every turn of one chat in Langfuse's Sessions view.
+                session_id=conv_id,
             ),
             settings.chat_timeout_seconds,
             label="chat",
@@ -429,6 +431,8 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                     document_id=doc_id,
                     request_id=request_id,
                     endpoint="/api/chat/stream",
+                    # Groups every turn of one chat in Langfuse's Sessions view.
+                    session_id=conv_id,
                 ),
                 request,
                 label="chat",

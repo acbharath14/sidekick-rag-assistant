@@ -383,6 +383,7 @@ def ask(
     document_id: str | None = None,
     request_id: str | None = None,
     endpoint: str | None = None,
+    session_id: str | None = None,
 ) -> Answer:
     """history: list of (question, answer) tuples for multi-turn context.
     user_groups: asker's groups for permission-aware retrieval (defaults to
@@ -390,7 +391,8 @@ def ask(
     an in-memory upload index). document_id: scope retrieval to a single
     uploaded document's chunks. request_id/endpoint: carried into the
     structured log line (api.py supplies them; direct callers get a
-    generated id and endpoint "direct").
+    generated id and endpoint "direct"). session_id: grouped as the
+    Langfuse session, so every turn of one conversation appears together.
 
     Opens one Langfuse trace per question (a no-op when tracing is off).
     """
@@ -409,12 +411,19 @@ def ask(
             document_id=document_id,
             request_id=request_id,
             endpoint=endpoint,
+            session_id=session_id,
         )
     metadata = {"model": settings.ollama_model}
     if document_id:
         metadata["document_id"] = document_id
-    with tracing.question_span(question, metadata=metadata):
-        return _ask_impl(
+    if request_id:
+        metadata["request_id"] = request_id
+    if endpoint:
+        metadata["endpoint"] = endpoint
+    with tracing.question_span(
+        question, metadata=metadata, session_id=session_id, tags=("feature:chat",)
+    ) as obs:
+        answer = _ask_impl(
             question,
             settings=settings,
             history=history,
@@ -424,6 +433,10 @@ def ask(
             request_id=request_id,
             endpoint=endpoint,
         )
+        # The root observation's output is the trace output: the answer
+        # a reviewer needs at a glance in the tracing table.
+        tracing.set_output(obs, answer.text)
+        return answer
 
 
 def _ask_impl(
@@ -626,10 +639,12 @@ def stream_ask(
     document_id: str | None = None,
     request_id: str | None = None,
     endpoint: str | None = None,
+    session_id: str | None = None,
 ):
     """Streaming variant of ask(). Yields {"token": str} chunks as the LLM
     generates, then a final {"answer": Answer}. Powers st.write_stream.
     request_id/endpoint are carried into the structured log line (see ask).
+    session_id groups the turn with the rest of its conversation.
 
     Opens one Langfuse trace per question (a no-op when tracing is off).
     The trace stays open until the stream is exhausted or the client
@@ -650,13 +665,20 @@ def stream_ask(
             document_id=document_id,
             request_id=request_id,
             endpoint=endpoint,
+            session_id=session_id,
         )
         return
     metadata = {"model": settings.ollama_model}
     if document_id:
         metadata["document_id"] = document_id
-    with tracing.question_span(question, metadata=metadata):
-        yield from _stream_ask_impl(
+    if request_id:
+        metadata["request_id"] = request_id
+    if endpoint:
+        metadata["endpoint"] = endpoint
+    with tracing.question_span(
+        question, metadata=metadata, session_id=session_id, tags=("feature:chat",)
+    ) as obs:
+        for event in _stream_ask_impl(
             question,
             settings=settings,
             history=history,
@@ -665,7 +687,10 @@ def stream_ask(
             document_id=document_id,
             request_id=request_id,
             endpoint=endpoint,
-        )
+        ):
+            if "answer" in event:
+                tracing.set_output(obs, event["answer"].text)
+            yield event
 
 
 def _stream_ask_impl(

@@ -365,6 +365,7 @@ def ask_via_graph(
     document_id: str | None = None,
     request_id: str | None = None,
     endpoint: str | None = None,
+    session_id: str | None = None,
 ) -> Answer:
     """Non-streaming ask through the graph. Same signature, same
     Answer, same logging as chain.ask(). Opens one Langfuse trace per
@@ -373,8 +374,14 @@ def ask_via_graph(
     metadata = {"model": settings.ollama_model}
     if document_id:
         metadata["document_id"] = document_id
-    with tracing.question_span(question, metadata=metadata):
-        return _ask_via_graph_impl(
+    if request_id:
+        metadata["request_id"] = request_id
+    if endpoint:
+        metadata["endpoint"] = endpoint
+    with tracing.question_span(
+        question, metadata=metadata, session_id=session_id, tags=("feature:chat",)
+    ) as obs:
+        answer = _ask_via_graph_impl(
             question,
             settings=settings,
             history=history,
@@ -384,6 +391,8 @@ def ask_via_graph(
             request_id=request_id,
             endpoint=endpoint,
         )
+        tracing.set_output(obs, answer.text)
+        return answer
 
 
 def _ask_via_graph_impl(
@@ -553,6 +562,7 @@ def stream_ask_via_graph(
     document_id: str | None = None,
     request_id: str | None = None,
     endpoint: str | None = None,
+    session_id: str | None = None,
 ):
     """Streaming ask through the graph. Same yielded events as
     chain.stream_ask(): {"token": str} chunks as the LLM generates,
@@ -565,8 +575,14 @@ def stream_ask_via_graph(
     metadata = {"model": settings.ollama_model}
     if document_id:
         metadata["document_id"] = document_id
-    with tracing.question_span(question, metadata=metadata):
-        yield from _stream_ask_via_graph_impl(
+    if request_id:
+        metadata["request_id"] = request_id
+    if endpoint:
+        metadata["endpoint"] = endpoint
+    with tracing.question_span(
+        question, metadata=metadata, session_id=session_id, tags=("feature:chat",)
+    ) as obs:
+        for event in _stream_ask_via_graph_impl(
             question,
             settings=settings,
             history=history,
@@ -575,7 +591,10 @@ def stream_ask_via_graph(
             document_id=document_id,
             request_id=request_id,
             endpoint=endpoint,
-        )
+        ):
+            if "answer" in event:
+                tracing.set_output(obs, event["answer"].text)
+            yield event
 
 
 def _stream_ask_via_graph_impl(

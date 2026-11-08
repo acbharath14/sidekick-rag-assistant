@@ -830,7 +830,7 @@ def test_chat_timeout_returns_504(monkeypatch):
     import rag_demo.api as api_mod
 
     def _slow(question, history=None, document_id=None,
-              request_id=None, endpoint=None):
+              request_id=None, endpoint=None, session_id=None):
         time.sleep(2)
         return None
 
@@ -846,7 +846,7 @@ def test_chat_transient_failure_returns_502(monkeypatch):
     import rag_demo.api as api_mod
 
     def _down(question, history=None, document_id=None,
-              request_id=None, endpoint=None):
+              request_id=None, endpoint=None, session_id=None):
         raise ConnectionError("connection refused")
 
     monkeypatch.setattr(api_mod, "ask", _down)
@@ -861,7 +861,7 @@ def test_chat_stream_timeout_yields_error_event(monkeypatch):
     from rag_demo.ollama_guard import OllamaTimeoutError
 
     def _stalled(question, history=None, document_id=None,
-                 request_id=None, endpoint=None):
+                 request_id=None, endpoint=None, session_id=None):
         yield {"token": "partial"}
         raise OllamaTimeoutError("stalled")
 

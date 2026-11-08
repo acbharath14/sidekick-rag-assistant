@@ -335,8 +335,11 @@ class Retriever:
             # Rank the whole pool, then floor, then trim — rerank() takes
             # top_k, so pass the pool size to keep every candidate.
             # Skipped on empty pools so no model is loaded for nothing.
-            # Traced so the rerank cost is visible in the question trace.
-            with tracing.span("rerank", metadata={"candidates": len(hits)}):
+            # Traced so the rerank cost is visible in the question trace,
+            # typed as a retrieval step rather than a generic span.
+            with tracing.span(
+                "rerank", metadata={"candidates": len(hits)}, as_type="retriever"
+            ):
                 hits = self._maybe_rerank(query, hits, len(hits))
             score_kind = "rerank"
         pre_floor = len(hits)
