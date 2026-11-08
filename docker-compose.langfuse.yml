@@ -135,12 +135,18 @@ services:
       - 127.0.0.1:9091:9091
     volumes:
       - langfuse_minio_data:/data
+    # cgr.dev/chainguard/minio is distroless: there is no curl and no
+    # wget inside the image, so an HTTP healthcheck fails on every retry,
+    # the container never reports healthy, and langfuse-web/worker then
+    # refuse to start on their `condition: service_healthy`. `mc` does
+    # ship with the image, and `mc ready local` is MinIO's own readiness
+    # check (the same test upstream Langfuse uses with this image).
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
-      interval: 5s
-      timeout: 10s
-      retries: 10
-      start_period: 10s
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
 
   redis:
     image: docker.io/redis:7
