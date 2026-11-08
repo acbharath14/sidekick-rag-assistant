@@ -392,8 +392,8 @@ returning 500s. The effective limits are visible at `GET /api/config`.
 
 Langfuse records one trace per question so you can see exactly where
 time goes: rewrite, retrieve, rerank, generate. Each span shows how
-long its step took. Summaries get their own traces too (single, map,
-reduce). This is the debugging tool for slow questions.
+long its step took. Summaries open one `summarize-document` span with the single, map
+and reduce calls nested under it. This is the debugging tool for slow questions.
 
 Tracing is off by default. Nothing changes unless you set the keys.
 
@@ -412,7 +412,9 @@ Tracing is off by default. Nothing changes unless you set the keys.
    them.
 3. Ask a question in the chat. In Langfuse, open Traces and click the
    `sidekick-question` trace. Expand the spans: `rewrite`,
-   `retrieve`, `rerank`, `generate`. The span lengths are the timings.
+   `retrieve`, `rerank`, `generate`. Every turn of one conversation
+   shares a session id, and the trace carries the question as input
+   and the answer as output. The span lengths are the timings.
    The second `retrieve-hits` span is the retrieval that runs again
    after generation to collect the citations for the answer.
 
