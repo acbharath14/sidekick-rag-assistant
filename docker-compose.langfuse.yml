@@ -30,6 +30,14 @@ x-langfuse-environment: &langfuse-environment
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse} # CHANGEME
   CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
+  # Without these two, Langfuse's ClickHouse migrations emit DDL with
+  # `ON CLUSTER default`. The single ClickHouse below has no cluster and
+  # no ZooKeeper, so that fails with "There is no Zookeeper configuration
+  # in server config", langfuse-web exits 1, and the stack never comes up.
+  # Upstream Langfuse defaults both of these explicitly; omitting them is
+  # not the same as setting cluster support to false.
+  CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
+  CLICKHOUSE_CLUSTER_NAME: ${CLICKHOUSE_CLUSTER_NAME:-default}
   LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
   LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
   LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
