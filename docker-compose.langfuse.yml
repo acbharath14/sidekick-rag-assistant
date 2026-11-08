@@ -151,8 +151,16 @@ services:
   redis:
     image: docker.io/redis:7
     restart: unless-stopped
-    environment:
-      REDIS_PASSWORD: ${REDIS_AUTH:-myredissecret} # CHANGEME
+    # The redis image does not read REDIS_PASSWORD from the environment:
+    # a password only exists when the server is started with --requirepass.
+    # Without it, Langfuse's Redis client (configured with REDIS_AUTH)
+    # sends AUTH to a server that has no password set, the connection is
+    # rejected, and langfuse-web exits 1 in a restart loop. noeviction is
+    # BullMQ's documented requirement, since an evicted job silently
+    # disappears.
+    command: >
+      --requirepass ${REDIS_AUTH:-myredissecret}
+      --maxmemory-policy noeviction
     ports:
       - 127.0.0.1:6379:6379
     volumes:
