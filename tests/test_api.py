@@ -725,6 +725,46 @@ def test_summarize_stream_connected_delivers_full_sequence(monkeypatch):
     assert cached.get(doc_id) == dones[0]["summary"]
 
 
+def test_summarize_stream_idle_timeout_covers_one_llm_call(monkeypatch):
+    """The stream watchdog must allow the silence of one whole LLM call.
+
+    A single-call summary emits nothing between start and done, and one
+    map chunk is allowed summarize_timeout_seconds. Inheriting the chat
+    stream's 300s meant a healthy but slow generation was killed mid-call
+    with "Summarization stalled", losing the work.
+    """
+    doc_id = "doc-idle-timeout-test"
+    monkeypatch.setattr(
+        api.conv_store, "get_document",
+        lambda d: {"id": doc_id, "summary": None} if d == doc_id else None,
+    )
+    monkeypatch.setitem(api._upload_texts, doc_id, "Short document text.")
+    monkeypatch.setattr(
+        api.conv_store, "set_document_summary", lambda d, s: None)
+    monkeypatch.setattr(
+        "rag_demo.summarize.summarize_events",
+        lambda *a, **k: iter([{"type": "done", "summary": "ok"}]),
+    )
+    captured = {}
+
+    def _capture(iterator, idle_timeout, *, label="stream", track=True):
+        captured["idle_timeout"] = idle_timeout
+        captured["track"] = track
+        return iterator
+
+    monkeypatch.setattr(api, "iter_with_idle_timeout", _capture)
+
+    response = asyncio.run(api.summarize_document_stream(doc_id, _StubRequest()))
+    _collect_sse(response)
+
+    settings = api.get_settings()
+    assert captured["idle_timeout"] == max(
+        settings.stream_idle_timeout_seconds,
+        settings.summarize_timeout_seconds + 30.0,
+    )
+    assert captured["track"] is False
+
+
 def test_summarize_stream_disconnect_abandons_generation(monkeypatch):
     """Client leaves mid-summary: pulls stop, the producer is closed, no
     done event is emitted, and no partial summary is cached."""

@@ -930,6 +930,17 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
             media_type="text/event-stream",
         )
 
+    # The longest silence a healthy summarize can produce is one LLM call:
+    # a single-call summary emits nothing between start and done, and one
+    # map chunk is allowed summarize_timeout_seconds. The stream watchdog
+    # has to permit that much silence, plus a margin so the call's own
+    # deadline lands first. Inheriting the chat default (300s) killed
+    # generations the per-call policy still considered healthy.
+    idle_timeout = max(
+        settings.stream_idle_timeout_seconds,
+        settings.summarize_timeout_seconds + 30.0,
+    )
+
     async def events():
         from .summarize import summarize_events
 
@@ -939,7 +950,7 @@ async def summarize_document_stream(doc_id: str, request: Request) -> StreamingR
             async for event in _drive_stream(
                 iter_with_idle_timeout(
                     summarize_events(text, settings),
-                    settings.stream_idle_timeout_seconds,
+                    idle_timeout,
                     label="summarize-stream",
                     # summarize_events tracks every chunk and reduce call
                     # itself; a tracked wrapper would count the stream as
