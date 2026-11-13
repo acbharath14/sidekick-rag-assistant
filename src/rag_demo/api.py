@@ -188,6 +188,8 @@ def _answer_to_wire(a: Answer) -> dict:
         "latency_ms": a.latency_ms,
         "standalone_question": a.standalone_question,
         "weak_evidence": a.weak_evidence,
+        "route": a.route,
+        "route_confidence": a.route_confidence,
     }
 
 

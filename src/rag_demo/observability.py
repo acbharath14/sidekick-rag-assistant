@@ -137,6 +137,9 @@ def log_question_event(
     standalone: bool,
     streamed: bool,
     cache_reload: bool,
+    route: str | None = None,
+    route_confidence: float | None = None,
+    route_ms: float | None = None,
 ) -> None:
     """One structured line per answered question (streaming included).
     Per-step timings are ms floats, or None when the step did not run
@@ -164,6 +167,9 @@ def log_question_event(
         weak_evidence=weak_evidence,
         standalone_question=standalone,
         cache_reload=cache_reload,
+        route=route,
+        route_confidence=route_confidence,
+        route_ms=route_ms,
     )
 
 
