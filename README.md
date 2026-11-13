@@ -2,7 +2,7 @@
 
 A miniature **retrieval-augmented generation** assistant: documents get indexed
 into a vector store, and a chat UI / CLI / MCP tool answers questions with
-source citations — grounded in retrieved passages, never hallucinated from
+source citations: grounded in retrieved passages, never hallucinated from
 thin air.
 
 > **Clean-room demo.** The default `docs/` corpus is fictional (Meridian
@@ -17,7 +17,7 @@ Documents ──chunk──▶ passages ──embed──▶ index ──retriev
 
 - **Sources.** Documents come from two places that never mix. **Demo mode**
   uses fictional data for zero-config trial (a made-up freight company's
-  docs and simulated Confluence pages), marked fictional everywhere — mode
+  docs and simulated Confluence pages), marked fictional everywhere: mode
   label, banner, citations, and exports. **Workspace mode** uses real
   sources: documentation (Playwright docs, this repo's own docs) and your
   workspace (Confluence, Jira, Outlook, AWS S3). Each source gets its own
@@ -26,7 +26,7 @@ Documents ──chunk──▶ passages ──embed──▶ index ──retriev
   embedded, and indexed. A question retrieves the most relevant passages,
   and the answer is built from those passages only, citing each fact to
   its source passage (`[source.md › Section]`). If nothing relevant is
-  found, the assistant says "I don't know" instead of guessing — and if
+  found, the assistant says "I don't know" instead of guessing. And if
   the best passages are too weak to trust, it says so explicitly rather
   than answering confidently.
 - **Pipeline walkthrough.** The sidebar's "How it works" button shows the
@@ -108,12 +108,12 @@ RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
 `python scripts/setup.py` is the idempotent bootstrap: it checks
 dependencies, installs/starts Ollama if absent, pulls the default model
 (`qwen3:8b`), builds the demo indexes (Meridian + Confluence mock), and
-verifies with one test question. Re-running is safe — every step is
-skipped when already done. Honest limits: model weights are gigabytes
-and are fetched, not cloned, so the repo stays light; the macOS/Windows
-install branches are written carefully but not yet verified on real
-machines (if an automatic install fails, the script prints the manual
-steps instead of pretending success).
+verifies with one test question. Re-running is safe: every step is
+skipped when already done. Limits: model weights are gigabytes
+and are fetched, not cloned, so the repo stays light. The macOS and
+Windows install branches are untested on real machines; if an automatic
+install fails, the script prints the manual steps instead of pretending
+success.
 
 ### Sidebar, Demo mode, and pre-flight checks
 
@@ -121,7 +121,7 @@ The sidebar has three tabs. **💬 Chat** holds the agentic-mode toggle,
 the **🔍 How it works** pipeline-walkthrough button, the session, and the
 chat list. **📚 Sources** holds source/mode
 selection, index status, the **🔨 Build demo index** button (builds the
-demo indexes inside the app — no terminal needed; chat input enables
+demo indexes inside the app, no terminal needed; chat input enables
 automatically when the build finishes), enterprise-connector setup, and
 document upload. **⚙️ Settings** holds the retrieval-mode and rerank
 toggles (defaults: hybrid, rerank on), the general-knowledge fallback,
@@ -162,13 +162,14 @@ Each source gets its own index (`.faiss_index*/`). The sidebar's Sources
 tab (Demo or Workspace mode) lets you switch sources; the CLI reads
 `RAG_DEMO_INDEX_DIR` if you want it there too.
 
-### ⚠️ Required index rebuild (chunk-level citations)
+### Stale indexes and chunk-level citations
 
-Indexes built before this change lack chunk-id and section metadata, so
-their citations degrade to filenames only. **Rebuild every index you use**
-after pulling this change — the app shows a rebuild banner above the chat
-while an index is stale, and the Sources tab's Build demo index button
-rebuilds stale demo indexes instead of skipping them:
+Citations carry the source file and section (`[source.md › Section]`) only
+when the index stores chunk-id and section metadata. An index built
+without that metadata still answers, but its citations degrade to
+filenames only. The app shows a rebuild banner above the chat while an
+index is stale, and the Sources tab's Build demo index button rebuilds
+stale demo indexes instead of skipping them. Rebuild every index you use:
 
 ```bash
 PYTHONPATH=src python -m rag_demo.ingest --source meridian
@@ -184,7 +185,7 @@ PYTHONPATH=src python -m rag_demo.ingest --source aws-s3        # needs RAG_DEMO
 A rebuild writes an `index_format.json` marker next to the index; anything
 without the current marker is treated as stale. Incremental rebuilds
 (`--incremental`) never skip a stale index, even when documents are
-unchanged. Nothing is lost by waiting — a stale index still answers, it
+unchanged. Nothing is lost by waiting: a stale index still answers, it
 just cites filenames until rebuilt.
 
 ### Try the permission demo
@@ -196,14 +197,14 @@ RAG_DEMO_USER_GROUPS=eng-all PYTHONPATH=src streamlit run app.py
 # Now restart with RAG_DEMO_USER_GROUPS=eng-leads -> it can.
 ```
 
-Restricted chunks are filtered *before* the prompt — the LLM never sees
+Restricted chunks are filtered *before* the prompt: the LLM never sees
 what the user may not. ACL is default-deny: with no groups you see public
 docs only. See `ARCHITECTURE.md`.
 
 ### Hybrid mode: general-knowledge fallback
 
 By default (`RAG_DEMO_HYBRID=1`), when the corpus has no answer the assistant
-falls back to the LLM's general knowledge — clearly marked with a
+falls back to the LLM's general knowledge, clearly marked with a
 🌐 badge and a "General knowledge (not from your corpus)" header, never
 silently mixed with cited facts. Uncheck it in the sidebar's Settings tab
 (or set `RAG_DEMO_HYBRID=0`) for strict corpus-only mode, where it says
@@ -213,14 +214,14 @@ silently mixed with cited facts. Uncheck it in the sidebar's Settings tab
 
 The sidebar's Settings tab has **🧪 Regression prompts**: 9 standard prompts
 (factual Q&A, code-identifier lookup, multi-turn follow-up, abstention,
-small-talk) that run through the full pipeline with live pass/fail checks —
+small-talk) that run through the full pipeline with live pass/fail checks,
 or **Run all** for the whole suite. Same cases as the CLI runner
 (`python -m evals.regression`), so the two can't drift apart.
 
 ### Feedback, export, and health
 
 - 👍/👎 under each answer persist to `feedback.jsonl` (next to the audit log
-  when `RAG_DEMO_AUDIT_LOG` is set) — the start of a golden-set flywheel.
+  when `RAG_DEMO_AUDIT_LOG` is set): the start of a golden-set flywheel.
 - **📥 Export chat** in the sidebar's Chat tab downloads the conversation as Markdown.
 - The Settings tab's Diagnostics show **🟢/🔴 Ollama status**, model
   presence, and index presence, and each answer reports its latency and
@@ -230,7 +231,7 @@ or **Run all** for the whole suite. Same cases as the CLI runner
 
 ### Chat management
 
-The sidebar's Chat tab keeps multiple named conversations —
+The sidebar's Chat tab keeps multiple named conversations:
 switch between them, rename, or delete. Chats persist to `chats/*.json`
 (gitignored) and survive restarts; new chats auto-title from the first
 question. **🔍 Search chat** filters the active conversation. A fresh chat
@@ -239,15 +240,15 @@ example prompts.
 
 ### Diagrams (Mermaid)
 
-Ask for a diagram explicitly — "show this as a diagram", "draw a
-flowchart of the deploy" — or click **📊 Show as diagram** under any
+Ask for a diagram explicitly, "show this as a diagram", "draw a
+flowchart of the deploy", or click **📊 Show as diagram** under any
 assistant answer to re-ask that question as a diagram. The model answers
 with a ```mermaid flowchart, rendered as a picture in chat; the raw code
 is always shown underneath, so a failed render is never a dead end.
 Diagrams are grounded like text answers: weak evidence means the code is
 shown but not rendered, never a freestyled flow. Rendering uses a small
-built-in HTML component with mermaid.js from a CDN (no new dependency) —
-it needs internet at view time; offline, the code block is still there.
+built-in HTML component with mermaid.js from a CDN (no new dependency).
+It needs internet at view time; offline, the code block is still there.
 No auto-detection in v1: the model draws a diagram only when asked.
 
 ### Upload a document
@@ -255,13 +256,13 @@ No auto-detection in v1: the model draws a diagram only when asked.
 Upload a PDF, DOCX, TXT, MD, or CSV from the sidebar's Sources tab: it's extracted
 in-memory, summarized on demand, and queryable without touching the main
 index. **Scanned PDFs** (images, no embedded text) fall back to Tesseract
-OCR automatically — first install the binaries:
+OCR automatically: first install the binaries:
 
 ```bash
 conda install -c conda-forge tesseract poppler
 ```
 
-In the sidebar's Sources tab: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV —
+In the sidebar's Sources tab: **📎 Upload a document** (PDF, DOCX, TXT, MD, CSV,
 10 MB cap). The app extracts the text in memory, offers a **📝 Summarize**
 button (map-reduce for long docs), and **💬 Ask about this file** builds an
 in-memory index so you can chat over it with `[upload:filename]` citations.
@@ -275,10 +276,10 @@ leave the machine.
 PYTHONPATH=src python -m rag_demo.ingest --source confluence-mock --incremental
 ```
 
-## React GUI (new)
+## React chat UI
 
 A modern **React + TypeScript + Vite** frontend backed by a **FastAPI**
-REST + SSE API. It augments the Streamlit UI — both talk to the same
+REST + SSE API. It augments the Streamlit UI. Both talk to the same
 retrieval pipeline.
 
 ### Run it
@@ -293,7 +294,7 @@ retrieval pipeline.
 
 Backend at `http://127.0.0.1:8000`, frontend at `http://localhost:5173`.
 Ollama keeps models in memory when `OLLAMA_KEEP_ALIVE` is set (the
-prereq script warns if it isn't) — without it, every prompt pays a full
+prereq script warns if it isn't). Without it, every prompt pays a full
 model reload on CPU.
 
 ### Features
@@ -301,19 +302,19 @@ model reload on CPU.
 - **Multi-chat.** A sidebar lists your conversations. Start new ones,
   rename, delete, switch between them. Conversations persist in SQLite
   and survive restarts. Your last-open conversation is restored on load.
-- **Document cabinet.** A top-level *Documents* view — your browsable
+- **Document cabinet.** A top-level *Documents* view: your browsable
   library of uploaded files. Search by filename; each card shows the
   filename, upload date, size, chunk count, and which extractor was used.
   Click a document for a detail view: metadata, chunk preview, and the
   LLM summary (regenerable).
-- **Upload.** Attach PDFs, DOCX, TXT, MD, or CSV — from the chat's 📎
+- **Upload.** Attach PDFs, DOCX, TXT, MD, or CSV, from the chat's 📎
   button or the cabinet header. PDFs are extracted with a fallback chain
   (pymupdf → pdfplumber → pypdf, inspired by
   [doc-extract-eval](https://github.com/acbharath14/doc-extract-eval)).
   A progress bar shows the byte transfer; documents are chunked and
   indexed into the persistent FAISS store on upload.
 - **On-demand summarization.** Each document gets an LLM summary when
-  you ask for it (📝 Summarize), not during upload — long documents use
+  you ask for it (📝 Summarize), not during upload. Long documents use
   map-reduce (summarize each chunk, then combine). Configurable timeout
   via `RAG_DEMO_SUMMARY_TIMEOUT` (default 600s) for CPU-speed models.
 - **Document-scoped chat.** "Chat about this document" from the cabinet
@@ -377,7 +378,7 @@ returning 500s. The effective limits are visible at `GET /api/config`.
 - **Uploaded documents** are chunked into the persistent FAISS index at
   `index_dir` (same store as the demo corpus), so they survive restarts
   and are searchable in every conversation.
-- **Episodic memory** still uses LanceDB, unchanged — it records past
+- **Episodic memory** still uses LanceDB, unchanged: it records past
   Q&As for semantic recall across sessions.
 - **LangGraph wrap (optional):** the ask chain also exists as a
   LangGraph `StateGraph` in `src/rag_demo/graph.py`, with the same steps
@@ -432,7 +433,7 @@ Notes:
   own trace instead of nesting under the question trace. The timing is
   still there. The same applies to summarize calls, which also run in a
   worker thread.
-- The agentic loop (agent.py) is not traced yet. Only the classic chat
+- The agentic loop (agent.py) is not traced. Only the classic chat
   path (ask and stream_ask) and summarization are traced.
 - `scripts/check_prereqs.sh` warns (never fails) when the keys are set
   but the Langfuse server is not reachable.
@@ -454,53 +455,53 @@ Add to your MCP client config (e.g. Claude Code):
 }
 ```
 
-Then ask your client to "search the Meridian docs for the rollback procedure"
-— it will call `search_docs` and answer from the corpus.
+Then ask your client to "search the Meridian docs for the rollback procedure".
+It will call `search_docs` and answer from the corpus.
 
 ## Agentic RAG
 
 Beyond single-shot retrieval, the agent (`rag_demo/agent.py`) runs a **ReAct loop**
 (Thought → Action → Observation) that plans multi-step research, calls tools,
-evaluates evidence, and refines its approach — up to 4 iterations
+evaluates evidence, and refines its approach, up to 4 iterations
 (`RAG_DEMO_AGENT_MAX_ITERATIONS`) and a 300s wall-clock budget
 (`RAG_DEMO_AGENT_BUDGET_SECONDS`) before synthesizing. On budget exhaustion
 it stops with the evidence gathered so far plus an explicit uncertainty note,
 never silently and never as a complete answer.
 
 **Tools:**
-- `search_docs` — local FAISS corpus (technical documentation)
-- `search_web` — web search via Tavily API (recommended) or DuckDuckGo fallback
+- `search_docs`: local FAISS corpus (technical documentation)
+- `search_web`: web search via Tavily API (recommended) or DuckDuckGo fallback
 
 **Features:**
-- **Parallel search dispatch** — the plan's search calls (FAISS, Tavily) run
+- **Parallel search dispatch**: the plan's search calls (FAISS, Tavily) run
   concurrently with order preserved for synthesis; LLM calls (planning,
   observation, synthesis) stay sequential, since they contend on the same CPU
   model.
-- **Single planning** — the UI-built plan is passed into the agent, so it
+- **Single planning**: the UI-built plan is passed into the agent, so it
   doesn't plan twice; direct API/CLI callers still get one fallback plan.
-- **Streamed synthesis** — agentic answers stream tokens like classic mode
+- **Streamed synthesis**: agentic answers stream tokens like classic mode
   instead of returning one-shot at the end.
-- **Structural sources** — agentic answers cite the retrieval result itself
+- **Structural sources**: agentic answers cite the retrieval result itself
   (source + section + chunk id for corpus hits, link titles for web hits),
-  not bracketed tokens scraped out of tool text — so tool markers like
+  not bracketed tokens scraped out of tool text, so tool markers like
   `[TOOL_ERROR]` or `[CACHED …]` can never appear as "sources".
-- **Smart routing** — the planner picks `search_docs` for API/code questions and
+- **Smart routing**: the planner picks `search_docs` for API/code questions and
   `search_web` for everything else (prices, news, general knowledge). A fast-path
   heuristic skips the LLM planning call for obvious web queries, saving 20-30s on CPU.
-- **Tavily backend** — set `RAG_DEMO_TAVILY_API_KEY` (free tier: 1,000 searches/month
+- **Tavily backend**: set `RAG_DEMO_TAVILY_API_KEY` (free tier: 1,000 searches/month
   at tavily.com) for reliable web search. Falls back to DuckDuckGo HTML scraping
   without a key (often blocked/rate-limited). Enter the key in the sidebar's Settings tab
   under Agentic mode, or as an environment variable.
-- **Conversation memory** — follow-ups like "what about Target?" are rewritten to
+- **Conversation memory**: follow-ups like "what about Target?" are rewritten to
   standalone questions using chat history, before routing. History is passed to all
   agent prompts for coherent multi-turn research.
-- **Search cache** — web results are cached per-session (30-min TTL) to save API
+- **Search cache**: web results are cached per-session (30-min TTL) to save API
   credits. Cached hits are marked `[CACHED Xs ago]`; stale entries auto-refresh.
   Clear via the sidebar's Settings tab ("🗑️ Clear search cache" button).
-- **Tool-failure honesty** — `[TOOL_ERROR]` (network/timeout/blocked) is distinguished
+- **Tool-failure honesty**: `[TOOL_ERROR]` (network/timeout/blocked) is distinguished
   from `[NO_RESULTS]` (genuinely empty). The agent never claims "doesn't exist" from
   a tool failure.
-- **Plan approval** — optional ASCII flowchart preview with Execute/Edit/Cancel
+- **Plan approval**: optional ASCII flowchart preview with Execute/Edit/Cancel
   before the agent runs (CLI and Streamlit).
 
 Enable in the sidebar's Chat tab ("🤖 Agentic mode") or via CLI:
@@ -527,11 +528,18 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── rerank.py            # cross-encoder reranking (on by default)
 │   ├── rewrite.py           # multi-turn query rewriting
 │   ├── chain.py             # RAG chain with citations (+ streaming)
+│   ├── graph.py             # LangGraph StateGraph wrap of the ask chain (off by default; see Architecture note)
 │   ├── caching.py           # per-session cache: embeddings, retriever, episodic memory
 │   ├── episodic.py          # LanceDB episodic memory (past Q&A recall)
 │   ├── chat_store.py        # persisted sidebar chats (chats/*.json)
 │   ├── agent.py             # agentic RAG: ReAct loop, parallel dispatch, streamed synthesis, budgets
 │   ├── agentic_cli.py       # CLI for agentic mode with plan approval
+│   ├── api.py               # FastAPI backend for the React chat UI (REST + SSE streaming)
+│   ├── conversations.py     # SQLite-backed conversations and uploaded-document records for the API
+│   ├── observability.py     # structured JSON logging + in-memory metrics (GET /api/metrics)
+│   ├── ollama_guard.py      # timeouts, bounded retries, and queue visibility for Ollama calls
+│   ├── rate_limit.py        # per-client rate limiting for chat, upload, and summarize
+│   ├── tracing.py           # opt-in Langfuse tracing
 │   ├── audit.py             # opt-in JSONL audit log
 │   ├── extract.py           # file text extraction (pdf/docx/txt/md/csv)
 │   ├── summarize.py         # map-reduce document summarization
@@ -551,10 +559,14 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 │   ├── per_source.py        # per-source suites: accuracy, retrieval, rerank, precision
 │   ├── per_source/          # one prompt file per source with real content
 │   └── mcp_demo.py          # MCP server demo script
+├── web/                     # React + TypeScript + Vite frontend (see web/README.md)
 └── tests/                   # pytest suite (fake embeddings/LLM): test_rag.py,
                             # test_phase4.py (modes, pre-flight), test_phase5.py
                             # (grounding), test_diagrams.py, test_walkthrough.py,
-                            # test_setup_prereqs.py, test_per_source.py
+                            # test_setup_prereqs.py, test_per_source.py,
+                            # test_api.py, test_auth.py, test_conversations.py,
+                            # test_summarize.py, test_tracing.py,
+                            # test_validation.py, test_graph.py
 ```
 
 ## Adapting it
@@ -569,23 +581,23 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 
 ## Operations
 
-**Nightly refresh** (cron-friendly — no-op when nothing changed):
+**Nightly refresh** (cron-friendly, no-op when nothing changed):
 
 ```cron
 0 2 * * * cd /path/to/sidekick-rag-assistant && PYTHONPATH=src .venv/bin/python -m rag_demo.ingest --source confluence-mock --incremental
 ```
 
 **Credentials**: connectors read secrets from env vars only
-(`RAG_DEMO_GITHUB_TOKEN`). Never commit tokens — `.gitignore` covers `.env`.
+(`RAG_DEMO_GITHUB_TOKEN`). Never commit tokens: `.gitignore` covers `.env`.
 
 **Audit log**: set `RAG_DEMO_AUDIT_LOG=/var/log/rag-demo/audit.jsonl` to record
 one JSON line per question (timestamp, question, sources, groups, model,
 latency). Answer text is excluded unless `RAG_DEMO_AUDIT_LOG_ANSWERS=1`.
 
-**Project status**: `STATUS.md` at the repo root is a dated status log (last
-updated 2026-10-08) — useful history, but not kept current per session. The
-code and this README are the current record.
+**Project status**: `STATUS.md` at the repo root is a dated status log from
+earlier in the project and is not kept current. The code and this README
+are the current record.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT: see [LICENSE](LICENSE).
