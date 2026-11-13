@@ -161,6 +161,13 @@ class Settings:
     hybrid_fallback: bool = field(
         default_factory=lambda: os.environ.get("RAG_DEMO_HYBRID", "1") == "1"
     )
+    # Jev routing trial (part 2): one decision-model question in front of
+    # retrieval. Default off; when on, ask()/stream_ask() route
+    # general-knowledge questions straight to general_knowledge_answer()
+    # and skip retrieval. Any routing failure degrades to the corpus path.
+    jev_routing: bool = field(
+        default_factory=lambda: os.environ.get("RAG_DEMO_JEV_ROUTING", "0") == "1"
+    )
     # LangGraph migration (Phase 2): route ask()/stream_ask() through the
     # StateGraph in rag_demo/graph.py instead of the LCEL chain in
     # chain.py. Same steps, same behavior; off by default until the

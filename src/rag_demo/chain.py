@@ -30,6 +30,7 @@ from .ollama_guard import (
     iter_with_idle_timeout,
 )
 from .retriever import Hit, Retriever, format_citation
+from .routing import ROUTE_GENERAL, RouteDecision, decide_route
 from .rewrite import rewrite_query
 
 SYSTEM = """You answer questions using ONLY the context below.
@@ -221,6 +222,12 @@ class Answer:
     grounded: bool = True  # False when answered from general knowledge (hybrid)
     standalone_question: str | None = None  # rewritten follow-up, if any
     weak_evidence: bool = False  # True when the relevance floor dropped every candidate
+    # Jev routing verdict (part 2). None when routing is off; "corpus" /
+    # "general_knowledge" when on. route_ms is the routing call's own time.
+    route: str | None = None
+    route_confidence: float | None = None
+    route_ms: float | None = None
+    route_fallback: bool = False  # True when routing failed, degraded to corpus
 
 
 def _weak_evidence(retriever) -> bool:
@@ -426,6 +433,79 @@ def ask(
         )
 
 
+def _route_question(standalone: str, settings: Settings) -> RouteDecision | None:
+    """Jev verdict for one question, or None when routing is off.
+
+    Never raises: decide_route() degrades to the corpus path on any
+    failure (see routing.py), so a broken Jev setup costs a routing
+    call, never an answer.
+    """
+    if not settings.jev_routing:
+        return None
+    return decide_route(standalone)
+
+
+def _finish_routed_general(
+    *,
+    question: str,
+    standalone: str,
+    llm,
+    settings: Settings,
+    decision: RouteDecision,
+    timings: dict,
+    request_id: str,
+    endpoint: str | None,
+    model: str,
+    streamed: bool,
+) -> Answer:
+    """Answer a general-knowledge-routed question without retrieval.
+
+    Shared tail for ask() and stream_ask(): the audit log, metrics,
+    and structured log run exactly as on the retrieved path, so a
+    routed answer is observable like any other. The episodic save is
+    skipped by the caller — the answer is ungrounded, like the hybrid
+    fallback.
+    """
+    _gen_t0 = time.perf_counter()
+    text = general_knowledge_answer(standalone, llm, settings)
+    generate_ms = (time.perf_counter() - _gen_t0) * 1000
+    latency_ms = decision.elapsed_ms + generate_ms
+    timings["generate_ms"] = generate_ms
+    timings["total_ms"] = latency_ms
+    answer = Answer(
+        text=text,
+        sources=[],
+        hits=[],
+        latency_ms=latency_ms,
+        grounded=not is_fallback_answer(text),
+        standalone_question=standalone if standalone != question else None,
+        route="general_knowledge",
+        route_confidence=decision.confidence,
+        route_ms=decision.elapsed_ms,
+        route_fallback=decision.fallback,
+    )
+    log_question(settings, question, answer, latency_ms)
+    record_question(timings, streamed=streamed)
+    log_question_event(
+        request_id=request_id,
+        endpoint=endpoint,
+        model=model,
+        question=question,
+        timings=timings,
+        hits=0,
+        sources=[],
+        grounded=answer.grounded,
+        weak_evidence=False,
+        standalone=answer.standalone_question is not None,
+        streamed=streamed,
+        cache_reload=False,
+        route="general_knowledge",
+        route_confidence=decision.confidence,
+        route_ms=decision.elapsed_ms,
+    )
+    return answer
+
+
 def _ask_impl(
     question: str,
     settings: Settings | None = None,
@@ -525,6 +605,23 @@ def _ask_impl(
     )
     if settings.rewrite_enabled and history:
         timings["rewrite_ms"] = (time.perf_counter() - _t0) * 1000
+    # Jev routing (part 2): decide on the standalone question — after the
+    # rewrite, so follow-ups are routed on their self-contained form.
+    # A general-knowledge verdict answers directly and skips retrieval.
+    decision = _route_question(standalone, settings)
+    if decision is not None and decision.route == ROUTE_GENERAL:
+        return _finish_routed_general(
+            question=question,
+            standalone=standalone,
+            llm=llm,
+            settings=settings,
+            decision=decision,
+            timings=timings,
+            request_id=request_id,
+            endpoint=endpoint,
+            model=model,
+            streamed=False,
+        )
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
     # Whether this question built a fresh retriever (cache reload) or
@@ -589,6 +686,10 @@ def _ask_impl(
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
         weak_evidence=_weak_evidence(retriever),
+        route=decision.route if decision is not None else None,
+        route_confidence=decision.confidence if decision is not None else None,
+        route_ms=decision.elapsed_ms if decision is not None else None,
+        route_fallback=decision.fallback if decision is not None else False,
     )
     log_question(settings, question, answer, latency_ms)
     record_question(timings, streamed=False)
@@ -605,6 +706,9 @@ def _ask_impl(
         standalone=answer.standalone_question is not None,
         streamed=False,
         cache_reload=cache_reload,
+        route=answer.route,
+        route_confidence=answer.route_confidence,
+        route_ms=answer.route_ms,
     )
     # Save to episodic memory for long-term recall (skip if it was a fallback
     # to avoid polluting memory with "I don't know" responses). Same
@@ -766,6 +870,26 @@ def _stream_ask_impl(
     )
     if settings.rewrite_enabled and history:
         timings["rewrite_ms"] = (time.perf_counter() - _t0) * 1000
+    # Jev routing (part 2): decide on the standalone question — after the
+    # rewrite, so follow-ups are routed on their self-contained form.
+    # A general-knowledge verdict answers directly and skips retrieval.
+    decision = _route_question(standalone, settings)
+    if decision is not None and decision.route == ROUTE_GENERAL:
+        answer = _finish_routed_general(
+            question=question,
+            standalone=standalone,
+            llm=llm,
+            settings=settings,
+            decision=decision,
+            timings=timings,
+            request_id=request_id,
+            endpoint=endpoint,
+            model=model,
+            streamed=True,
+        )
+        yield {"token": answer.text}
+        yield {"answer": answer}
+        return
     started = time.perf_counter()
     source_filter = f"upload:{document_id}" if document_id else None
     # Whether this question built a fresh retriever (cache reload) or
@@ -909,6 +1033,10 @@ def _stream_ask_impl(
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
         weak_evidence=_weak_evidence(retriever),
+        route=decision.route if decision is not None else None,
+        route_confidence=decision.confidence if decision is not None else None,
+        route_ms=decision.elapsed_ms if decision is not None else None,
+        route_fallback=decision.fallback if decision is not None else False,
     )
     log_question(settings, question, answer, latency_ms)
     record_question(timings, streamed=True)
@@ -925,6 +1053,9 @@ def _stream_ask_impl(
         standalone=answer.standalone_question is not None,
         streamed=True,
         cache_reload=cache_reload,
+        route=answer.route,
+        route_confidence=answer.route_confidence,
+        route_ms=answer.route_ms,
     )
     # Save to episodic memory (skip ungrounded fallbacks). Same cached
     # instance as the search above.

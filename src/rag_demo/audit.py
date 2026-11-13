@@ -29,6 +29,17 @@ def log_question(settings, question: str, answer, latency_ms: float) -> None:
         else settings.llm_provider,
         "latency_ms": round(latency_ms, 1),
     }
+    if getattr(answer, "route", None) is not None:
+        entry["route"] = answer.route
+        entry["route_confidence"] = (
+            round(answer.route_confidence, 3)
+            if answer.route_confidence is not None
+            else None
+        )
+        entry["route_ms"] = (
+            round(answer.route_ms, 1) if answer.route_ms is not None else None
+        )
+        entry["route_fallback"] = bool(getattr(answer, "route_fallback", False))
     if settings.audit_log_answers:
         entry["answer"] = answer.text
     p = Path(path)
