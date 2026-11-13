@@ -5,9 +5,11 @@ generate), orchestrated as a LangGraph StateGraph instead of an LCEL
 chain. Same steps, same primitives, same behavior: the nodes call the
 same helpers the chain uses (rewrite_query, retriever.search, the same
 prompt template, _invoke_chain, ThinkBlockFilter), so the answer for a
-question is the same whichever path runs it. No new capabilities here:
-no conditional retrieval, no self-correcting loops, no tool calls, no
-new persistent state. Those are design decisions for a later review.
+question is the same whichever path runs it. Conditional retrieval is
+wired here, flag-gated: a route node after rewrite can skip retrieval
+for general-knowledge questions (see the route/general nodes). No
+self-correcting loops, no tool calls, no new persistent state — those
+are still design decisions for a later review.
 
 Routing: ask()/stream_ask() in chain.py dispatch here when
 Settings.use_langgraph is set (RAG_DEMO_USE_LANGGRAPH=1). The API, CLI,
@@ -70,6 +72,7 @@ from .observability import (
 from .ollama_guard import OllamaTimeoutError, iter_with_idle_timeout
 from .retriever import Hit, Retriever
 from .rewrite import rewrite_query
+from .routing import ROUTE_CORPUS, ROUTE_GENERAL, decide_route
 
 # Same head-buffer length as chain._stream_ask_impl: tokens are held
 # until 200 visible chars so an abstention can be caught before display.
@@ -124,6 +127,13 @@ class QuestionState(TypedDict, total=False):
     context: str
     text: str
     small_talk: bool
+    # Jev routing verdict (conditional retrieval). "corpus" means the
+    # flow went to retrieval (including when routing is off);
+    # "general_knowledge" means the general node answered without it.
+    route: str | None
+    route_confidence: float | None
+    route_ms: float | None
+    route_fallback: bool
 
 
 def build_question_graph(
@@ -189,6 +199,31 @@ def build_question_graph(
             else:
                 standalone = state["question"]
             return {"standalone": standalone}
+
+    def _route_node(state: QuestionState) -> dict:
+        # Jev routing decision (conditional retrieval). Runs after the
+        # rewrite so the decision is made on the standalone question,
+        # exactly as the chain routes after its rewrite. Flag off or
+        # document-scoped chat: corpus, no Jev call. Any router
+        # failure degrades to corpus (decide_route's contract), so
+        # this node never raises for a routing failure.
+        with tracing.span("route"):
+            if not settings.jev_routing or state.get("document_id"):
+                timings["route_ms"] = 0.0
+                return {
+                    "route": ROUTE_CORPUS,
+                    "route_confidence": None,
+                    "route_ms": 0.0,
+                    "route_fallback": False,
+                }
+            decision = decide_route(state["standalone"])
+            timings["route_ms"] = decision.elapsed_ms
+            return {
+                "route": decision.route,
+                "route_confidence": decision.confidence,
+                "route_ms": decision.elapsed_ms,
+                "route_fallback": decision.fallback,
+            }
 
     def _retrieve_node(state: QuestionState) -> dict:
         # The one retrieval per question. Mirrors build_chain's cached-
@@ -295,6 +330,22 @@ def build_question_graph(
             )
             return {"text": text}
 
+    def _general_node(state: QuestionState) -> dict:
+        # General-knowledge answer without retrieval: the same call
+        # the chain's routed-general path and the graph's hybrid
+        # fallback use. When streaming, the text goes out in chunks
+        # through the stream writer, as the chain's routed-general
+        # stream does; one-shot callers get the full text in state.
+        with tracing.span("general"):
+            text = general_knowledge_answer(
+                state["standalone"], llm, settings
+            )
+            if streaming:
+                writer = get_stream_writer()
+                for i in range(0, len(text), 50):
+                    writer({"token": text[i : i + 50]})
+            return {"text": text}
+
     def _small_talk_node(state: QuestionState) -> dict:
         # small_talk_answer already wraps itself in the "small-talk"
         # span and uses the guarded invoke_llm.
@@ -304,19 +355,28 @@ def build_question_graph(
     def _route(state: QuestionState) -> str:
         return "small_talk" if is_small_talk(state["question"]) else "episodic"
 
+    def _route_retrieval(state: QuestionState) -> str:
+        return "general" if state.get("route") == ROUTE_GENERAL else "retrieve"
+
     graph = StateGraph(QuestionState)
     graph.add_node("episodic", _episodic_node)
     graph.add_node("rewrite", _rewrite_node)
+    graph.add_node("route", _route_node)
     graph.add_node("retrieve", _retrieve_node)
     graph.add_node("generate", _generate_node)
+    graph.add_node("general", _general_node)
     graph.add_node("small_talk", _small_talk_node)
     graph.add_conditional_edges(
         START, _route, {"small_talk": "small_talk", "episodic": "episodic"}
     )
     graph.add_edge("episodic", "rewrite")
-    graph.add_edge("rewrite", "retrieve")
+    graph.add_edge("rewrite", "route")
+    graph.add_conditional_edges(
+        "route", _route_retrieval, {"retrieve": "retrieve", "general": "general"}
+    )
     graph.add_edge("retrieve", "generate")
     graph.add_edge("generate", END)
+    graph.add_edge("general", END)
     graph.add_edge("small_talk", END)
     return graph.compile()
 
@@ -406,6 +466,7 @@ def _ask_via_graph_impl(
         "episodic_ms": None,
         "retrieve_ms": None,
         "retrieve_calls": 0,
+        "route_ms": None,
         "generate_ms": None,
         "total_ms": None,
     }
@@ -434,8 +495,15 @@ def _ask_via_graph_impl(
         text = strip_think(final.get("text") or "")
         # Server-side hybrid fallback, as in chain._ask_impl: if the
         # model abstained but hybrid is on, answer from general
-        # knowledge instead of showing "No relevant answer".
-        if settings.hybrid_fallback and is_abstention(text):
+        # knowledge instead of showing "No relevant answer". Only on
+        # the corpus branch: a routed-general answer never re-enters
+        # it (parity with chain._finish_routed_general, which returns
+        # the general answer directly).
+        if (
+            final.get("route") != ROUTE_GENERAL
+            and settings.hybrid_fallback
+            and is_abstention(text)
+        ):
             text = general_knowledge_answer(
                 final.get("standalone") or question, llm, settings
             )
@@ -462,6 +530,7 @@ def _ask_via_graph_impl(
             "episodic_ms": None,
             "retrieve_ms": None,
             "retrieve_calls": 0,
+            "route_ms": None,
             "generate_ms": latency_ms,
             "total_ms": latency_ms,
         }
@@ -488,26 +557,41 @@ def _ask_via_graph_impl(
             grounded=True,
             standalone_question=None,
         )
-    # generate_ms is graph time minus retrieval, so it includes prompt
-    # formatting and retriever construction: an approximation, not a
-    # pure LLM timer (see observability.log_question_event).
+    # generate_ms is graph time minus retrieval and routing, so it
+    # includes prompt formatting and retriever construction: an
+    # approximation, not a pure LLM timer (see
+    # observability.log_question_event).
     timings["generate_ms"] = max(
-        latency_ms - (timings.get("retrieve_ms") or 0.0), 0.0
+        latency_ms
+        - (timings.get("retrieve_ms") or 0.0)
+        - (timings.get("route_ms") or 0.0),
+        0.0,
     )
     timings["total_ms"] = latency_ms
     standalone = final.get("standalone") or question
-    # Citations reuse the hits generation already retrieved: no second
-    # search. Traced as its own span so the reuse is visible in the
-    # trace, as in chain._ask_impl.
-    with tracing.span("retrieve-hits"):
-        hits = _generation_hits(
-            capture,
-            ctx.get("retriever") or retriever,
-            standalone,
-            ctx.get("groups"),
-            ctx.get("source_filter"),
-        )
+    # Routed-general answers have no hits: retrieval never ran, and
+    # _generation_hits would run a search here to fill the gap, which
+    # would defeat the skip. Same shape as chain._finish_routed_general.
+    routed_general = final.get("route") == ROUTE_GENERAL
+    if routed_general:
+        hits: list[Hit] = []
+    else:
+        # Citations reuse the hits generation already retrieved: no second
+        # search. Traced as its own span so the reuse is visible in the
+        # trace, as in chain._ask_impl.
+        with tracing.span("retrieve-hits"):
+            hits = _generation_hits(
+                capture,
+                ctx.get("retriever") or retriever,
+                standalone,
+                ctx.get("groups"),
+                ctx.get("source_filter"),
+            )
     sources = sorted({h.source for h in hits})
+    # Answer.route is None when routing is off, exactly as on the chain
+    # (see Answer): the route node's "corpus" is a flow decision, not a
+    # routing verdict. When routing ran, the fields mirror the verdict.
+    routed = settings.jev_routing
     answer = Answer(
         text=text,
         sources=sources,
@@ -515,7 +599,15 @@ def _ask_via_graph_impl(
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
-        weak_evidence=_weak_evidence(ctx.get("retriever") or retriever),
+        weak_evidence=(
+            False
+            if routed_general
+            else _weak_evidence(ctx.get("retriever") or retriever)
+        ),
+        route=final.get("route") if routed else None,
+        route_confidence=final.get("route_confidence") if routed else None,
+        route_ms=final.get("route_ms") if routed else None,
+        route_fallback=final.get("route_fallback", False) if routed else False,
     )
     log_question(settings, question, answer, latency_ms)
     record_question(timings, streamed=False)
@@ -531,7 +623,10 @@ def _ask_via_graph_impl(
         weak_evidence=answer.weak_evidence,
         standalone=answer.standalone_question is not None,
         streamed=False,
-        cache_reload=cache_reload,
+        cache_reload=cache_reload if not routed_general else False,
+        route=answer.route,
+        route_confidence=answer.route_confidence,
+        route_ms=answer.route_ms,
     )
     # Save to episodic memory for long-term recall (skip if it was a
     # fallback to avoid polluting memory with "I don't know"
@@ -598,6 +693,7 @@ def _stream_ask_via_graph_impl(
         "episodic_ms": None,
         "retrieve_ms": None,
         "retrieve_calls": 0,
+        "route_ms": None,
         "generate_ms": None,
         "total_ms": None,
     }
@@ -661,7 +757,11 @@ def _stream_ask_via_graph_impl(
                 head_text += visible
                 if len(head_text) >= HEAD_CHECK_LEN or "</think>" in "".join(parts):
                     # Enough to judge — check for abstention.
-                    if settings.hybrid_fallback and is_abstention(head_text):
+                    if (
+                        settings.hybrid_fallback
+                        and final_state.get("route") != ROUTE_GENERAL
+                        and is_abstention(head_text)
+                    ):
                         abstention_detected = True
                         # Don't yield the abstention; fall through to fallback below.
                         head_buf = []
@@ -752,6 +852,7 @@ def _stream_ask_via_graph_impl(
             "episodic_ms": None,
             "retrieve_ms": None,
             "retrieve_calls": 0,
+            "route_ms": None,
             "generate_ms": _ms,
             "total_ms": _ms,
         }
@@ -787,7 +888,11 @@ def _stream_ask_via_graph_impl(
     standalone = final_state.get("standalone") or question
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
     # in the one-shot path), stream a general-knowledge answer instead.
-    if settings.hybrid_fallback and (abstention_detected or is_abstention(text)):
+    if (
+        final_state.get("route") != ROUTE_GENERAL
+        and settings.hybrid_fallback
+        and (abstention_detected or is_abstention(text))
+    ):
         fb_text = general_knowledge_answer(standalone, llm, settings)
         for i in range(0, len(fb_text), 50):
             yield {"token": fb_text[i : i + 50]}
@@ -804,20 +909,34 @@ def _stream_ask_via_graph_impl(
             yield {"token": flushed}
     latency_ms = (time.perf_counter() - started) * 1000
     timings["generate_ms"] = max(
-        latency_ms - (timings.get("retrieve_ms") or 0.0), 0.0
+        latency_ms
+        - (timings.get("retrieve_ms") or 0.0)
+        - (timings.get("route_ms") or 0.0),
+        0.0,
     )
     timings["total_ms"] = latency_ms
-    # Citations reuse the hits generation already retrieved (see
-    # _generation_hits): no second search. Traced as its own span so the
-    # reuse is visible in the trace.
-    with tracing.span("retrieve-hits"):
-        hits = _generation_hits(
-            capture,
-            ctx.get("retriever") or retriever,
-            standalone,
-            ctx.get("groups"),
-            ctx.get("source_filter"),
-        )
+    # Routed-general answers have no hits: retrieval never ran, and
+    # _generation_hits would run a search here to fill the gap, which
+    # would defeat the skip. Same shape as chain._finish_routed_general.
+    routed_general = final_state.get("route") == ROUTE_GENERAL
+    if routed_general:
+        hits: list[Hit] = []
+    else:
+        # Citations reuse the hits generation already retrieved (see
+        # _generation_hits): no second search. Traced as its own span so the
+        # reuse is visible in the trace.
+        with tracing.span("retrieve-hits"):
+            hits = _generation_hits(
+                capture,
+                ctx.get("retriever") or retriever,
+                standalone,
+                ctx.get("groups"),
+                ctx.get("source_filter"),
+            )
+    # Answer.route is None when routing is off, exactly as on the chain
+    # (see Answer): the route node's "corpus" is a flow decision, not a
+    # routing verdict. When routing ran, the fields mirror the verdict.
+    routed = settings.jev_routing
     answer = Answer(
         text=text,
         sources=sorted({h.source for h in hits}),
@@ -825,7 +944,17 @@ def _stream_ask_via_graph_impl(
         latency_ms=latency_ms,
         grounded=not is_fallback_answer(text),
         standalone_question=standalone if standalone != question else None,
-        weak_evidence=_weak_evidence(ctx.get("retriever") or retriever),
+        weak_evidence=(
+            False
+            if routed_general
+            else _weak_evidence(ctx.get("retriever") or retriever)
+        ),
+        route=final_state.get("route") if routed else None,
+        route_confidence=final_state.get("route_confidence") if routed else None,
+        route_ms=final_state.get("route_ms") if routed else None,
+        route_fallback=(
+            final_state.get("route_fallback", False) if routed else False
+        ),
     )
     log_question(settings, question, answer, latency_ms)
     record_question(timings, streamed=True)
@@ -841,7 +970,10 @@ def _stream_ask_via_graph_impl(
         weak_evidence=answer.weak_evidence,
         standalone=answer.standalone_question is not None,
         streamed=True,
-        cache_reload=cache_reload,
+        cache_reload=cache_reload if not routed_general else False,
+        route=answer.route,
+        route_confidence=answer.route_confidence,
+        route_ms=answer.route_ms,
     )
     # Save to episodic memory (skip ungrounded fallbacks). Same cached
     # instance as the search in the node.
