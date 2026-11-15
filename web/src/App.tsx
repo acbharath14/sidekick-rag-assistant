@@ -32,6 +32,7 @@ import ConversationSidebar from "./components/ConversationSidebar";
 import DocumentDetail from "./components/DocumentDetail";
 import DocumentsView from "./components/DocumentsView";
 import HealthIndicator from "./components/HealthIndicator";
+import MicButton from "./components/MicButton";
 import UploadCard from "./components/UploadCard";
 
 let nextId = 1;
@@ -687,6 +688,12 @@ export default function App() {
             rows={2}
             disabled={sending}
             aria-label="Your question"
+          />
+          <MicButton
+            disabled={sending}
+            value={input}
+            onChange={setInput}
+            onDictationError={(message) => setChatError(message)}
           />
           <button
             type="button"
