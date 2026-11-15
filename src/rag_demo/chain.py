@@ -130,6 +130,35 @@ def is_fallback_answer(text: str) -> bool:
     return head.startswith("🌐") or "general knowledge" in head
 
 
+# The banner general_knowledge_answer() prepends, and the line SYSTEM_HYBRID
+# tells the model to start a general-knowledge answer with. A reply that is
+# only this line has no answer in it.
+GENERAL_KNOWLEDGE_BANNER = "🌐 General knowledge (not from your corpus)."
+
+# Honest line used when the model returns nothing twice; the banner must
+# never stand alone as the whole reply.
+EMPTY_GENERAL_KNOWLEDGE = (
+    "I couldn't come up with an answer for that. Try rephrasing the question."
+)
+
+
+def is_bare_banner(text: str) -> bool:
+    """True when a reply is empty or only the general-knowledge banner.
+
+    The hybrid prompt tells the model to start a general-knowledge answer
+    with exactly the banner line; a model can emit that line and then stop,
+    leaving a reply that labels itself but answers nothing. That is not an
+    abstention, so is_abstention() does not catch it.
+    """
+    body = strip_think(text).strip()
+    if not body:
+        return True
+    if body.startswith(GENERAL_KNOWLEDGE_BANNER):
+        return not body[len(GENERAL_KNOWLEDGE_BANNER):].strip()
+    # A truncated banner (model stopped mid-line) is equally answerless.
+    return body.startswith("🌐") and GENERAL_KNOWLEDGE_BANNER.startswith(body)
+
+
 ABSTENTION_PHRASES = (
     "no relevant answer",
     "don't know",
@@ -191,7 +220,20 @@ def general_knowledge_answer(question: str, llm, settings: Settings | None = Non
     # Tracing span wraps the guarded call (see small_talk_answer).
     with tracing.span("general-knowledge"):
         text = strip_think(invoke_llm(llm, prompt, settings, label="general-knowledge"))
-    return "🌐 General knowledge (not from your corpus).\n" + text.strip()
+        if is_bare_banner(text):
+            # Empty (or banner-only) generation: one retry with the same
+            # prompt before admitting defeat, so a bare banner never
+            # reaches the user.
+            text = strip_think(
+                invoke_llm(llm, prompt, settings, label="general-knowledge-retry")
+            )
+    body = text.strip()
+    if body.startswith(GENERAL_KNOWLEDGE_BANNER):
+        # The model echoed the banner itself; don't double it.
+        body = body[len(GENERAL_KNOWLEDGE_BANNER):].strip()
+    if not body:
+        body = EMPTY_GENERAL_KNOWLEDGE
+    return GENERAL_KNOWLEDGE_BANNER + "\n" + body
 
 
 def _invoke_chain(chain, standalone: str, settings: Settings, config=None) -> str:
@@ -647,9 +689,10 @@ def _ask_impl(
             chain, standalone, settings, config=tracing.run_config(run_name="generate")
         )
         text = strip_think(text)
-        # Server-side hybrid fallback: if the model abstained but hybrid is on,
-        # answer from general knowledge instead of showing "No relevant answer".
-        if settings.hybrid_fallback and is_abstention(text):
+        # Server-side hybrid fallback: if the model abstained, or emitted only
+        # the general-knowledge banner and stopped, answer from general
+        # knowledge instead of showing "No relevant answer" or a bare banner.
+        if settings.hybrid_fallback and (is_abstention(text) or is_bare_banner(text)):
             text = general_knowledge_answer(standalone, llm, settings)
     except Exception as e:
         # No behavior change: the error still propagates to the caller
@@ -918,6 +961,10 @@ def _stream_ask_impl(
     head_buf: list[str] = []
     head_text = ""
     abstention_detected = False
+    # Text already streamed to the client. The tail fallback must only send
+    # what the client hasn't seen, so the token stream still concatenates
+    # to the final answer.
+    streamed_text = ""
     HEAD_CHECK_LEN = 200
     stream_iter = None
     try:
@@ -948,9 +995,11 @@ def _stream_ask_impl(
                         # Not an abstention — flush the buffer and continue streaming.
                         for b in head_buf:
                             yield {"token": b}
+                            streamed_text += b
                         head_buf = []
             else:
                 yield {"token": visible}
+                streamed_text += visible
     except OllamaTimeoutError:
         # A stalled stream must fail fast, not burn a second full
         # generation on the one-shot fallback.
@@ -985,6 +1034,7 @@ def _stream_ask_impl(
             raise
         visible = strip_think(text)
         yield {"token": visible}
+        streamed_text += visible
         parts = [text]
     finally:
         # Release the model call as soon as the stream ends, errors, or is
@@ -1000,10 +1050,21 @@ def _stream_ask_impl(
     text = strip_think(text)  # belt-and-braces: no reasoning in stored answers
     # Server-side hybrid fallback: if abstention was detected mid-stream (or
     # in the one-shot path), stream a general-knowledge answer instead.
-    if settings.hybrid_fallback and (abstention_detected or is_abstention(text)):
+    # A bare banner (model emitted the banner line and stopped) falls back
+    # the same way, so the client never sees a banner with no answer.
+    if settings.hybrid_fallback and (
+        abstention_detected or is_abstention(text) or is_bare_banner(text)
+    ):
         fb_text = general_knowledge_answer(standalone, llm, settings)
-        for i in range(0, len(fb_text), 50):
-            yield {"token": fb_text[i : i + 50]}
+        # The head may already have streamed (e.g. flushed on </think>);
+        # send only the unseen suffix so tokens still equal the answer.
+        unseen = (
+            fb_text[len(streamed_text):]
+            if fb_text.startswith(streamed_text)
+            else fb_text
+        )
+        for i in range(0, len(unseen), 50):
+            yield {"token": unseen[i : i + 50]}
         text = fb_text
     else:
         # Yield buffered head first (in order), then the filter's tail,
