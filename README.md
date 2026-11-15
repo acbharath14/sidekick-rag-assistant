@@ -326,6 +326,11 @@ model reload on CPU.
   pills, passages expand inline, and a context banner always shows the
   active model and retrieval settings. Thumbs up/down feedback is
   persisted for later review.
+- **Voice input.** Dictate a question with the 🎙️ mic button beside the
+  chat input. It uses the browser's built-in speech recognition
+  (Chrome/Edge); interim words appear live in the input and the final
+  transcript is appended to whatever is already typed. Nothing is sent
+  until you press Send.
 
 ### API endpoints
 

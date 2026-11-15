@@ -503,6 +503,42 @@ body {
   transition: width 0.15s ease;
 }
 
+.mic-button {
+  background: var(--bg-soft);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 12px;
+  font-size: 1.1rem;
+  cursor: pointer;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+
+.mic-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mic-button-listening {
+  border-color: var(--error-text);
+  background: var(--error-bg);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(160, 42, 42, 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(160, 42, 42, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(160, 42, 42, 0);
+  }
+}
+
 .upload-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
