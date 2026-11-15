@@ -662,6 +662,172 @@ def test_ask_marks_fallback_answer_ungrounded(_indexed, monkeypatch):
     assert ans.text.startswith("🌐")
 
 
+def test_general_knowledge_answer_retries_once_on_empty():
+    from rag_demo.chain import general_knowledge_answer
+
+    replies = iter(["", "No. Tomorrow is a regular working day."])
+
+    class SeqLLM:
+        def invoke(self, prompt):
+            return next(replies)
+
+    out = general_knowledge_answer("Is it a holiday tomorrow?", SeqLLM())
+    assert out == (
+        "🌐 General knowledge (not from your corpus).\n"
+        "No. Tomorrow is a regular working day."
+    )
+
+
+def test_general_knowledge_answer_never_returns_bare_banner():
+    from rag_demo.chain import general_knowledge_answer
+
+    class EmptyLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt):
+            self.calls += 1
+            return ""
+
+    llm = EmptyLLM()
+    out = general_knowledge_answer("Is it a holiday tomorrow?", llm)
+    assert llm.calls == 2, "expected exactly one retry"
+    assert out.startswith("🌐 General knowledge (not from your corpus).\n")
+    assert "couldn't come up with an answer" in out
+    assert out.strip() != "🌐 General knowledge (not from your corpus)."
+
+
+def test_general_knowledge_answer_retries_think_only_output():
+    from rag_demo.chain import general_knowledge_answer
+
+    replies = iter(
+        ["<think>Let me think about holidays.</think>", "No. It is not a holiday."]
+    )
+
+    class SeqLLM:
+        def invoke(self, prompt):
+            return next(replies)
+
+    out = general_knowledge_answer("Is it a holiday tomorrow?", SeqLLM())
+    assert out == (
+        "🌐 General knowledge (not from your corpus).\nNo. It is not a holiday."
+    )
+
+
+def test_ask_bare_banner_triggers_general_knowledge_fallback(_indexed, monkeypatch):
+    """A chain reply that is only the banner line falls back to a fresh
+    general-knowledge answer instead of reaching the user bare."""
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+
+    calls = {"n": 0}
+
+    def canned(prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "🌐 General knowledge (not from your corpus)."
+        return "No. Tomorrow is a regular working day."
+
+    monkeypatch.setattr(chain_mod, "get_llm", lambda s: RunnableLambda(canned))
+    _indexed.hybrid_fallback = True
+    ans = ask("Is it a holiday tomorrow?", _indexed)
+    assert calls["n"] == 2
+    assert ans.text.startswith("🌐 General knowledge (not from your corpus).\n")
+    assert "regular working day" in ans.text
+    assert ans.grounded is False
+
+
+def test_stream_ask_bare_banner_triggers_general_knowledge_fallback(
+    _indexed, monkeypatch
+):
+    """Same as above on the streaming path: tokens still equal the answer."""
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+    from rag_demo.chain import stream_ask
+
+    class FakeChain:
+        def stream(self, question, config=None):
+            yield "🌐 General knowledge "
+            yield "(not from your corpus)."
+
+        def invoke(self, question, config=None):
+            return "unused"
+
+    class FakeRetriever:
+        last_candidates = 0
+        last_floor_dropped = 0
+
+        def search(self, *a, **k):
+            return []
+
+    monkeypatch.setattr(
+        "rag_demo.chain.build_chain",
+        lambda *a, **k: (FakeChain(), FakeRetriever(), ["*"]),
+    )
+    monkeypatch.setattr(
+        chain_mod, "get_llm",
+        lambda s: RunnableLambda(
+            lambda prompt: "No. Tomorrow is a regular working day."
+        ),
+    )
+    _indexed.hybrid_fallback = True
+    events = list(stream_ask("Is it a holiday tomorrow?", _indexed))
+    tokens = [e["token"] for e in events if "token" in e]
+    answers = [e["answer"] for e in events if "answer" in e]
+    assert len(answers) == 1
+    assert answers[0].text == "".join(tokens)
+    assert answers[0].text.startswith("🌐 General knowledge (not from your corpus).\n")
+    assert "regular working day" in answers[0].text
+    assert answers[0].grounded is False
+
+
+def test_stream_ask_bare_banner_after_think_block_keeps_token_invariant(
+    _indexed, monkeypatch
+):
+    """A think block flushes the banner head before the stream ends bare;
+    the fallback must send only the unseen suffix, not the banner twice."""
+    from langchain_core.runnables import RunnableLambda
+
+    import rag_demo.chain as chain_mod
+    from rag_demo.chain import stream_ask
+
+    class FakeChain:
+        def stream(self, question, config=None):
+            yield "<think>Let me think about holidays.</think>"
+            yield "🌐 General knowledge (not from your corpus)."
+
+        def invoke(self, question, config=None):
+            return "unused"
+
+    class FakeRetriever:
+        last_candidates = 0
+        last_floor_dropped = 0
+
+        def search(self, *a, **k):
+            return []
+
+    monkeypatch.setattr(
+        "rag_demo.chain.build_chain",
+        lambda *a, **k: (FakeChain(), FakeRetriever(), ["*"]),
+    )
+    monkeypatch.setattr(
+        chain_mod, "get_llm",
+        lambda s: RunnableLambda(
+            lambda prompt: "No. Tomorrow is a regular working day."
+        ),
+    )
+    _indexed.hybrid_fallback = True
+    events = list(stream_ask("Is it a holiday tomorrow?", _indexed))
+    tokens = [e["token"] for e in events if "token" in e]
+    answers = [e["answer"] for e in events if "answer" in e]
+    assert len(answers) == 1
+    assert answers[0].text == "".join(tokens)
+    assert answers[0].text.count("🌐") == 1, "banner must not be doubled"
+    assert "regular working day" in answers[0].text
+
+
 def test_rewrite_strips_think_blocks():
     from rag_demo.rewrite import rewrite_query
 
