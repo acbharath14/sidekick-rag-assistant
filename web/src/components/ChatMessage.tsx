@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { ChatResponse } from "../types";
+import { DEFAULT_SETTINGS } from "../settings";
+import type { GuiSettings } from "../settings";
 import Avatar from "./Avatar";
 import FeedbackButtons from "./FeedbackButtons";
 import PassageViewer from "./PassageViewer";
@@ -11,6 +13,7 @@ interface Props {
   createdAt?: number;
   streamingText?: string;
   isStreaming?: boolean;
+  settings?: GuiSettings;
 }
 
 export function formatTime(ts: number): string {
@@ -94,13 +97,14 @@ export default function ChatMessage({
   createdAt,
   streamingText,
   isStreaming = false,
+  settings = DEFAULT_SETTINGS,
 }: Props) {
   const text = isStreaming && streamingText !== undefined ? streamingText : response.text;
   const latency = formatLatency(response.latency_ms);
 
   return (
     <article className="message message-assistant">
-      <Avatar role="assistant" />
+      <Avatar role="assistant" settings={settings} />
       <div className="message-content">
       {!response.grounded && (
         <span
