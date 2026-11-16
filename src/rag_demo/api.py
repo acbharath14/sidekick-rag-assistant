@@ -15,6 +15,9 @@ Endpoints:
   GET  /api/config       safe settings subset (no secrets)
   GET  /api/metrics      in-memory counters + latency summaries (no new dep)
   POST /api/feedback     thumbs up/down vote (persisted via audit.log_feedback)
+  GET  /api/connectors   enterprise connector sources + sync status
+  POST /api/connectors/{source}/sync  start a sync (background job)
+  GET  /api/connectors/jobs/{job_id}  poll one sync job
   POST /api/upload       upload one or more documents into the PERSISTENT
                          FAISS index (repeated "file" field)
   GET  /api/documents            list uploaded documents
@@ -47,8 +50,10 @@ import hmac
 import json
 import logging
 import os
+import threading
 import uuid
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -69,6 +74,14 @@ from .ollama_guard import (
     run_with_timeout,
 )
 from . import conversations as conv_store
+from .connectors.sync import (
+    CONNECTORS,
+    SOURCE_INFO,
+    index_dir_for,
+    is_configured,
+    read_source_status,
+    sync_source,
+)
 from .observability import (
     FILENAME_PREVIEW_CHARS,
     get_metrics_snapshot,
@@ -91,6 +104,44 @@ app = FastAPI(title="Sidekick RAG API")
 # In-memory text cache for on-demand summarization, keyed by doc_id.
 # The vectors themselves live in the persistent FAISS index on disk.
 _upload_texts: dict[str, str] = {}
+
+# Connector sync jobs: one entry per started job, keyed by job id.
+# A job holds status + summary/error only — never a token. The set
+# _connector_sync_running guards one sync per source at a time; a sync
+# rebuilds that source's FAISS index, so two concurrent runs would
+# clobber each other's index files.
+_connector_jobs: dict[str, dict] = {}
+_connector_jobs_lock = threading.Lock()
+_connector_sync_running: set[str] = set()
+
+
+def _finish_connector_job(
+    job_id: str, status: str, summary: dict | None = None, error: str | None = None
+) -> None:
+    with _connector_jobs_lock:
+        job = _connector_jobs.get(job_id)
+        if job is None:
+            return
+        job["status"] = status
+        job["finished_at"] = datetime.now(timezone.utc).isoformat()
+        job["summary"] = summary
+        job["error"] = error
+
+
+def _run_connector_sync_job(
+    job_id: str, source: str, config: dict | None, full: bool
+) -> None:
+    """Background sync worker: run sync_source, record the outcome."""
+    try:
+        settings = Settings(index_dir=index_dir_for(source))
+        connector = CONNECTORS[source]()
+        summary = sync_source(connector, settings, full=full, config=config)
+        _finish_connector_job(job_id, "done", summary=summary)
+    except Exception as exc:  # surfaced to the poller, never raised here
+        _finish_connector_job(job_id, "error", error=str(exc))
+    finally:
+        with _connector_jobs_lock:
+            _connector_sync_running.discard(source)
 
 
 def _document_text(doc_id: str, settings: Settings) -> str | None:
@@ -332,6 +383,14 @@ class ChatRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     question: str
     vote: str  # "up" | "down"
+
+
+class ConnectorSyncRequest(BaseModel):
+    # Optional token for this sync run only: held in memory, used once,
+    # never persisted and never logged. When omitted, the connector
+    # reads its token from the environment.
+    token: str | None = None
+    full: bool = False  # ignore the stored timestamp and fetch everything
 
 
 class CreateConversationRequest(BaseModel):
@@ -588,6 +647,83 @@ def feedback(req: FeedbackRequest) -> dict:
         return {"ok": False, "error": "vote must be 'up' or 'down'"}
     log_feedback(get_settings(), req.question, req.vote)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Enterprise connectors (see docs/connectors.md)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/connectors", dependencies=_auth)
+def list_connectors() -> dict:
+    """Every connector source with its configured + last-sync status."""
+    settings = get_settings()
+    out = []
+    for source in sorted(CONNECTORS):
+        info = SOURCE_INFO[source]
+        configured, missing = is_configured(source)
+        status = read_source_status(source, settings)
+        out.append(
+            {
+                "source": source,
+                "label": info["label"],
+                "auth": info["auth"],
+                "configured": configured,
+                "missing_env": missing,
+                "setup_hint": info["hint"],
+                "last_sync": status["last_sync"],
+                "total_docs": status["total_docs"],
+            }
+        )
+    return {"connectors": out}
+
+
+@app.post("/api/connectors/{source}/sync", dependencies=_auth)
+def start_connector_sync(source: str, req: ConnectorSyncRequest) -> dict:
+    """Start a sync for one source in a background thread.
+
+    Returns a job id immediately; poll GET /api/connectors/jobs/{job_id}
+    for the result. The optional token is used once for this run and is
+    never stored: it appears in no job record, state file, or log.
+    """
+    if source not in CONNECTORS:
+        raise HTTPException(status_code=404, detail=f"Unknown connector source: {source}")
+    with _connector_jobs_lock:
+        if source in _connector_sync_running:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A sync is already running for {source}.",
+            )
+        _connector_sync_running.add(source)
+        job_id = uuid.uuid4().hex[:12]
+        _connector_jobs[job_id] = {
+            "job_id": job_id,
+            "source": source,
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "summary": None,
+            "error": None,
+        }
+    config: dict | None = None
+    if req.token:
+        config = {SOURCE_INFO[source]["token_config_key"]: req.token}
+    thread = threading.Thread(
+        target=_run_connector_sync_job,
+        args=(job_id, source, config, req.full),
+        daemon=True,
+    )
+    thread.start()
+    return {"job_id": job_id, "source": source, "status": "running"}
+
+
+@app.get("/api/connectors/jobs/{job_id}", dependencies=_auth)
+def get_connector_job(job_id: str) -> dict:
+    """Poll one sync job. Never contains a token."""
+    job = _connector_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown sync job.")
+    return dict(job)
 
 
 # Max files accepted in one POST /api/upload request. The per-file size

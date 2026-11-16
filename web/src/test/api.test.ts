@@ -4,6 +4,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  fetchConnectorJob,
+  fetchConnectors,
+  startConnectorSync,
   streamSummarizeDocument,
   summarizeDocument,
   uploadFile,
@@ -266,6 +269,105 @@ describe("streamSummarizeDocument", () => {
         },
       });
     });
+    vi.unstubAllGlobals();
+  });
+});
+
+// --- Connectors ---------------------------------------------------------------
+
+describe("fetchConnectors", () => {
+  it("returns the connector list", async () => {
+    const payload = {
+      connectors: [
+        {
+          source: "github",
+          label: "GitHub",
+          auth: "Personal Access Token",
+          configured: false,
+          missing_env: ["GITHUB_TOKEN", "GITHUB_REPO"],
+          setup_hint: "Set GITHUB_TOKEN.",
+          last_sync: null,
+          total_docs: 0,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(payload),
+      }),
+    );
+    const data = await fetchConnectors();
+    expect(data.connectors[0].source).toBe("github");
+    expect(data.connectors[0].configured).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("throws on HTTP failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, statusText: "Boom" }),
+    );
+    await expect(fetchConnectors()).rejects.toThrow("500");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("startConnectorSync", () => {
+  it("POSTs the token and full flag, and returns the job", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          job_id: "abc123",
+          source: "github",
+          status: "running",
+          started_at: null,
+          finished_at: null,
+          summary: null,
+          error: null,
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const job = await startConnectorSync("github", {
+      token: "FAKE-TOKEN",
+      full: true,
+    });
+    expect(job.job_id).toBe("abc123");
+    expect(job.status).toBe("running");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/connectors/github/sync"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ token: "FAKE-TOKEN", full: true }),
+      }),
+    );
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("fetchConnectorJob", () => {
+  it("returns the job for polling", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            job_id: "abc123",
+            source: "github",
+            status: "done",
+            started_at: "2026-11-16T00:00:00Z",
+            finished_at: "2026-11-16T00:00:05Z",
+            summary: { source: "github", fetched: 9, total: 9, last_sync: "2026-10-05T08:00:00Z" },
+            error: null,
+          }),
+      }),
+    );
+    const job = await fetchConnectorJob("abc123");
+    expect(job.status).toBe("done");
+    expect(job.summary?.fetched).toBe(9);
     vi.unstubAllGlobals();
   });
 });
