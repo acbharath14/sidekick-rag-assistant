@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import type { ChatResponse } from "../types";
+import type { AgentProgressStep, ChatResponse } from "../types";
 import FeedbackButtons from "./FeedbackButtons";
 import PassageViewer from "./PassageViewer";
 
@@ -10,6 +10,8 @@ interface Props {
   createdAt?: number;
   streamingText?: string;
   isStreaming?: boolean;
+  /** Plan steps and loop phases reported while the agent worked. */
+  agentProgress?: AgentProgressStep[];
 }
 
 export function formatTime(ts: number): string {
@@ -93,12 +95,29 @@ export default function ChatMessage({
   createdAt,
   streamingText,
   isStreaming = false,
+  agentProgress,
 }: Props) {
   const text = isStreaming && streamingText !== undefined ? streamingText : response.text;
   const latency = formatLatency(response.latency_ms);
 
   return (
     <article className="message message-assistant">
+      {agentProgress && agentProgress.length > 0 && (
+        <details className="agent-plan" open={isStreaming}>
+          <summary>
+            Agent plan · {agentProgress.length} step
+            {agentProgress.length === 1 ? "" : "s"}
+            {isStreaming ? " (running…)" : ""}
+          </summary>
+          <ol className="agent-steps">
+            {agentProgress.map((step, i) => (
+              <li key={i}>
+                <span className="agent-phase">{step.phase}</span> {step.message}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       {!response.grounded && (
         <span
           className="fallback-badge"

@@ -447,6 +447,57 @@ body {
   cursor: default;
 }
 
+.agentic-toggle {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.agentic-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.agentic-toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.agent-plan {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+}
+
+.agent-plan summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.agent-steps {
+  margin: 6px 0 2px;
+  padding-left: 18px;
+}
+
+.agent-steps li {
+  margin-bottom: 2px;
+}
+
+.agent-phase {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
 .composer {
   flex-direction: column;
   align-items: stretch;

@@ -47,6 +47,8 @@ import hmac
 import json
 import logging
 import os
+import queue
+import threading
 import uuid
 from dataclasses import asdict
 from typing import Any
@@ -57,10 +59,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .agent import agentic_ask, stream_agentic_ask
 from .audit import log_feedback
 from .caching import clear_cache
 from .chain import Answer, ask, stream_ask
 from .config import Settings, get_embeddings, get_settings
+from .retriever import Retriever
 from .ollama_guard import (
     OllamaTimeoutError,
     is_transient_error,
@@ -196,7 +200,7 @@ def _answer_to_wire(a: Answer) -> dict:
 # --- Cancel-on-disconnect for the streaming endpoints ---------------------
 #
 # The two SSE endpoints below drive their producer (stream_ask /
-# summarize_events) one item at a time in a worker thread while a small
+# _agentic_event_stream / summarize_events) one item at a time in a worker thread while a small
 # watcher task probes request.is_disconnected(). When the client goes
 # away mid-generation the driver closes the producer iterator: that
 # raises GeneratorExit inside the producer, whose finally closes the
@@ -327,6 +331,7 @@ class ChatRequest(BaseModel):
     history: list[tuple[str, str]] | None = None
     document_id: str | None = None  # when set, scope retrieval to this doc
     conversation_id: str | None = None  # when set, persist the exchange
+    agentic: bool = False  # when set, answer via the ReAct agent instead of the classic chain
 
 
 class FeedbackRequest(BaseModel):
@@ -349,6 +354,82 @@ def _document_exists(doc_id: str | None) -> str | None:
     return doc_id if conv_store.get_document(doc_id) else None
 
 
+class _SourceFilteredRetriever:
+    """Wraps a Retriever, restricting corpus search to one source.
+
+    The agent's search_docs tool calls retriever.search(query, k=k) with
+    no scoping of its own, so document-scoped agentic chat needs the
+    filter applied here. Web search stays unscoped, as in classic mode.
+    """
+
+    def __init__(self, inner, source_filter: str):
+        self._inner = inner
+        self._source_filter = source_filter
+
+    def search(self, query, k=None):
+        return self._inner.search(query, k=k, source_filter=self._source_filter)
+
+
+def _agentic_retriever(doc_id: str | None):
+    """Retriever for an agentic ask, or None for whole-corpus search.
+
+    A document-scoped ask wraps the default retriever so the agent's
+    corpus tool only sees that document's chunks.
+    """
+    if not doc_id:
+        return None
+    return _SourceFilteredRetriever(
+        Retriever(get_settings()), source_filter=f"upload:{doc_id}"
+    )
+
+
+def _agentic_event_stream(question, history, retriever):
+    """Drive stream_agentic_ask in a worker thread, yielding its events in
+    arrival order with progress callbacks interleaved.
+
+    The agent yields nothing until synthesis starts, so its on_progress
+    callbacks are the only signal during planning and searching. Those
+    callbacks fire inside the agent generator, which runs in a worker
+    thread here; a queue carries both progress events and the agent's own
+    token/answer events back to this generator in arrival order. Agent
+    errors raised in the thread are re-raised here so the endpoint's
+    existing error handling still applies.
+
+    On disconnect the stream driver closes this generator. The worker
+    thread is a daemon and the agent loop is bounded by its iteration and
+    wall-clock budgets, so it finishes on its own; the agent has no
+    cancel hook, so a disconnected client costs at most one bounded run.
+    """
+    events: queue.Queue = queue.Queue()
+
+    def on_progress(phase, message):
+        events.put({"type": "progress", "phase": phase, "message": message})
+
+    def run():
+        try:
+            for event in stream_agentic_ask(
+                question,
+                history=history,
+                on_progress=on_progress,
+                retriever=retriever,
+            ):
+                events.put(event)
+        except BaseException as e:  # noqa: BLE001 — re-raised in the consumer
+            events.put(e)
+        finally:
+            events.put(None)
+
+    thread = threading.Thread(target=run, daemon=True, name="agentic-stream")
+    thread.start()
+    while True:
+        item = events.get()
+        if item is None:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+
+
 @app.post("/api/chat", dependencies=_rate_chat)
 def chat(req: ChatRequest) -> dict:
     request_id = new_request_id()
@@ -366,18 +447,30 @@ def chat(req: ChatRequest) -> dict:
     # request. Transient Ollama errors surface as 502 once the bounded
     # retries inside the chain are exhausted.
     settings = get_settings()
+    doc_id = _document_exists(req.document_id)
     try:
-        answer = run_with_timeout(
-            lambda: ask(
-                req.question,
-                history=req.history or [],
-                document_id=_document_exists(req.document_id),
-                request_id=request_id,
-                endpoint="/api/chat",
-            ),
-            settings.chat_timeout_seconds,
-            label="chat",
-        )
+        if req.agentic:
+            answer = run_with_timeout(
+                lambda: agentic_ask(
+                    req.question,
+                    history=req.history or [],
+                    retriever=_agentic_retriever(doc_id),
+                ),
+                settings.chat_timeout_seconds,
+                label="chat",
+            )
+        else:
+            answer = run_with_timeout(
+                lambda: ask(
+                    req.question,
+                    history=req.history or [],
+                    document_id=doc_id,
+                    request_id=request_id,
+                    endpoint="/api/chat",
+                ),
+                settings.chat_timeout_seconds,
+                label="chat",
+            )
     except OllamaTimeoutError:
         raise HTTPException(
             status_code=http_status.HTTP_504_GATEWAY_TIMEOUT,
@@ -423,20 +516,42 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
 
     async def events():
         final_answer: Answer | None = None
+        if req.agentic:
+            producer = _agentic_event_stream(
+                req.question,
+                history=req.history or [],
+                retriever=_agentic_retriever(doc_id),
+            )
+        else:
+            producer = stream_ask(
+                req.question,
+                history=req.history or [],
+                document_id=doc_id,
+                request_id=request_id,
+                endpoint="/api/chat/stream",
+            )
         try:
             async for event in _drive_stream(
-                stream_ask(
-                    req.question,
-                    history=req.history or [],
-                    document_id=doc_id,
-                    request_id=request_id,
-                    endpoint="/api/chat/stream",
-                ),
+                producer,
                 request,
                 label="chat",
             ):
                 if "token" in event:
                     yield f"data: {json.dumps({'token': event['token']})}\n\n"
+                elif event.get("type") == "progress":
+                    # Agentic mode only: plan steps and loop phases, so the
+                    # GUI can show what the agent is doing while it works.
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "progress",
+                                "phase": event["phase"],
+                                "message": event["message"],
+                            }
+                        )
+                        + "\n\n"
+                    )
                 else:
                     final_answer = event["answer"]
                     payload = {"done": _answer_to_wire(final_answer)}
