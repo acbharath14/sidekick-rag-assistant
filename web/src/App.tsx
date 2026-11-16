@@ -27,6 +27,7 @@ import type {
 } from "./types";
 import AttachButton from "./components/AttachButton";
 import ChatMessage, { formatTime } from "./components/ChatMessage";
+import Avatar from "./components/Avatar";
 import ContextBanner from "./components/ContextBanner";
 import ConversationSidebar from "./components/ConversationSidebar";
 import DocumentDetail from "./components/DocumentDetail";
@@ -608,9 +609,12 @@ export default function App() {
         {turns.map((t) =>
           t.role === "user" ? (
             <article key={t.id} className="message message-user">
-              <div className="message-body">{t.text}</div>
-              <div className="message-time message-time-user">
-                {formatTime(t.createdAt)}
+              <Avatar role="user" />
+              <div className="message-content">
+                <div className="message-body">{t.text}</div>
+                <div className="message-time message-time-user">
+                  {formatTime(t.createdAt)}
+                </div>
               </div>
             </article>
           ) : t.response ? (

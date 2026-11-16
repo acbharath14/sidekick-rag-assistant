@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { ChatResponse } from "../types";
+import Avatar from "./Avatar";
 import FeedbackButtons from "./FeedbackButtons";
 import PassageViewer from "./PassageViewer";
 
@@ -99,6 +100,8 @@ export default function ChatMessage({
 
   return (
     <article className="message message-assistant">
+      <Avatar role="assistant" />
+      <div className="message-content">
       {!response.grounded && (
         <span
           className="fallback-badge"
@@ -156,6 +159,7 @@ export default function ChatMessage({
         {createdAt !== undefined && (
           <span className="message-time">{formatTime(createdAt)}</span>
         )}
+      </div>
       </div>
     </article>
   );
