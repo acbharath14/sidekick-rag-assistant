@@ -100,10 +100,11 @@ def test_markdown_source_loads_docs_with_citation_names():
     docs = MarkdownDirectorySource(
         Path(__file__).resolve().parent.parent / "docs"
     ).load()
-    assert len(docs) == 5
+    assert len(docs) == 6
     assert all(d.metadata["source"].endswith(".md") for d in docs)
     assert {d.metadata["source"] for d in docs} == {
         "api-reference.md",
+        "connectors.md",
         "deployment-runbook.md",
         "onboarding.md",
         "security-policy.md",
