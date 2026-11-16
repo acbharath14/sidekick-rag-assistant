@@ -117,3 +117,31 @@ export interface ConversationDetail {
 export interface ChatResponseWithTitle extends ChatResponse {
   conversation_title?: string;
 }
+
+export interface ConnectorStatus {
+  source: string;
+  label: string;
+  auth: string;
+  configured: boolean;
+  missing_env: string[];
+  setup_hint: string;
+  last_sync: string | null;
+  total_docs: number;
+}
+
+export interface ConnectorSyncSummary {
+  source: string;
+  fetched: number;
+  total: number;
+  last_sync: string | null;
+}
+
+export interface ConnectorSyncJob {
+  job_id: string;
+  source: string;
+  status: "running" | "done" | "error";
+  started_at: string | null;
+  finished_at: string | null;
+  summary: ConnectorSyncSummary | null;
+  error: string | null;
+}

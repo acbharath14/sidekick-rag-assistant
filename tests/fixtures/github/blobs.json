@@ -1,0 +1,7 @@
+{
+ "blob-sha-guide-1": "# Getting started\n\nInstall the widget catalog, then run `widgets serve`. The catalog lists every SKU with its price and stock level.\n",
+ "blob-sha-api-1": "# Widget API reference\n\n`GET /widgets` lists widgets. `GET /widgets/{sku}` returns one widget with price and stock.\n",
+ "blob-sha-old-1": "# Old notes\n\nDeprecated setup notes for the retired v1 catalog.\n",
+ "blob-sha-guide-2": "# Getting started\n\nInstall the widget catalog, then run `widgets serve`. The catalog lists every SKU with its price and stock level. New in v2: bulk import from CSV.\n",
+ "blob-sha-new-1": "# Release notes\n\nVersion 2 adds bulk import and a stock-level webhook.\n"
+}

@@ -1101,6 +1101,129 @@ body {
   gap: 12px;
 }
 
+/* --- Connectors --- */
+
+.cabinet-subtitle {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.connector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.connector-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.connector-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.connector-card-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.connector-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--pill-text);
+  white-space: nowrap;
+}
+
+.connector-badge-ok {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.connector-auth {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.connector-hint,
+.connector-missing,
+.connector-stats {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.connector-missing {
+  color: var(--error-text);
+}
+
+.connector-token {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.connector-token input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+}
+
+.connector-token input:focus {
+  border-color: var(--accent);
+}
+
+.connector-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.connector-actions .cabinet-upload-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.connector-full {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.connector-result {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.connector-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--error-text);
+}
+
 .doc-card {
   position: relative;
   border: 1px solid var(--border);

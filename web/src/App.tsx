@@ -27,6 +27,7 @@ import type {
 } from "./types";
 import AttachButton from "./components/AttachButton";
 import ChatMessage, { formatTime } from "./components/ChatMessage";
+import ConnectorsView from "./components/ConnectorsView";
 import ContextBanner from "./components/ContextBanner";
 import ConversationSidebar from "./components/ConversationSidebar";
 import DocumentDetail from "./components/DocumentDetail";
@@ -84,7 +85,7 @@ export default function App() {
   const [upload, setUpload] = useState<UploadResponse | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [view, setView] = useState<"chat" | "documents">("chat");
+  const [view, setView] = useState<"chat" | "documents" | "connectors">("chat");
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState<string | null>(null);
@@ -519,6 +520,17 @@ export default function App() {
             >
               📁 Documents
             </button>
+            <button
+              type="button"
+              className={
+                "view-tab" + (view === "connectors" ? " view-tab-active" : "")
+              }
+              onClick={() => {
+                setView("connectors");
+              }}
+            >
+              🔌 Connectors
+            </button>
           </nav>
         </div>
         <div className="header-actions">
@@ -585,6 +597,10 @@ export default function App() {
               uploadProgress={uploadProgress}
             />
           )}
+        </main>
+      ) : view === "connectors" ? (
+        <main className="chat">
+          <ConnectorsView />
         </main>
       ) : (
       <>

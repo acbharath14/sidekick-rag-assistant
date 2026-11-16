@@ -21,6 +21,7 @@ INDEX_DIRS = {
     "confluence": ".faiss_index_confluence_real",
     "jira": ".faiss_index_jira",
     "outlook": ".faiss_index_outlook",
+    "github": ".faiss_index_github_connector",
     "aws-s3": ".faiss_index_s3",
 }
 

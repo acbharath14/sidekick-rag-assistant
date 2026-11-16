@@ -1,6 +1,8 @@
 import type {
   ChatResponse,
   ConfigResponse,
+  ConnectorStatus,
+  ConnectorSyncJob,
   Conversation,
   ConversationDetail,
   DocumentDetail,
@@ -165,6 +167,30 @@ export interface DocumentListResponse {
 
 export function listDocuments(): Promise<DocumentListResponse> {
   return getJson<DocumentListResponse>("/api/documents");
+}
+
+export interface ConnectorListResponse {
+  connectors: ConnectorStatus[];
+}
+
+export function fetchConnectors(): Promise<ConnectorListResponse> {
+  return getJson<ConnectorListResponse>("/api/connectors");
+}
+
+export function startConnectorSync(
+  source: string,
+  body: { token?: string | null; full?: boolean },
+): Promise<ConnectorSyncJob> {
+  return postJson<ConnectorSyncJob>(
+    `/api/connectors/${encodeURIComponent(source)}/sync`,
+    body,
+  );
+}
+
+export function fetchConnectorJob(jobId: string): Promise<ConnectorSyncJob> {
+  return getJson<ConnectorSyncJob>(
+    `/api/connectors/jobs/${encodeURIComponent(jobId)}`,
+  );
 }
 
 export async function getDocument(id: string): Promise<DocumentDetail> {
