@@ -33,7 +33,6 @@ import DocumentDetail from "./components/DocumentDetail";
 import DocumentsView from "./components/DocumentsView";
 import HealthIndicator from "./components/HealthIndicator";
 import MicButton from "./components/MicButton";
-import { Button } from "@/components/ui/button";
 import UploadCard from "./components/UploadCard";
 
 let nextId = 1;
@@ -696,14 +695,14 @@ export default function App() {
             onChange={setInput}
             onDictationError={(message) => setChatError(message)}
           />
-          <Button
+          <button
             type="button"
+            className="send-button"
             onClick={sending ? handleStop : send}
             disabled={!sending && !input.trim()}
-            className="h-auto cursor-pointer px-5 text-[0.95rem] font-semibold shadow-none hover:bg-primary"
           >
             {sending ? "Stop" : "Send"}
-          </Button>
+          </button>
         </div>
       </footer>
       </>
