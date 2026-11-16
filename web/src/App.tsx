@@ -39,6 +39,7 @@ let nextId = 1;
 
 const ACTIVE_CONV_KEY = "sidekick.activeConversationId";
 const SIDEBAR_KEY = "sidekick.sidebarCollapsed";
+const AGENTIC_KEY = "sidekick.agenticMode";
 
 function messageToTurns(msgs: ConversationMessage[]): ChatTurn[] {
   const turns: ChatTurn[] = [];
@@ -98,6 +99,12 @@ export default function App() {
   const [conversationsLoading, setConversationsLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem(SIDEBAR_KEY) === "1",
+  );
+  // Agentic mode: answers come from the ReAct agent (plan, search, check
+  // the evidence, refine) instead of the classic single retrieve-then-
+  // answer chain. Persisted like the sidebar preference.
+  const [agenticMode, setAgenticMode] = useState(
+    () => localStorage.getItem(AGENTIC_KEY) === "1",
   );
   const cancelRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -254,6 +261,13 @@ export default function App() {
     });
   }, []);
 
+  const toggleAgentic = useCallback(() => {
+    setAgenticMode((prev) => {
+      localStorage.setItem(AGENTIC_KEY, prev ? "0" : "1");
+      return !prev;
+    });
+  }, []);
+
   const historyFor = (upto: number): Array<[string, string]> => {
     const out: Array<[string, string]> = [];
     const slice = turns.slice(0, upto);
@@ -298,7 +312,15 @@ export default function App() {
     setTurns((prev) => [
       ...prev,
       { id: userId, role: "user", text: question, createdAt: Date.now() },
-      { id: asstId, role: "assistant", text: "", createdAt: Date.now(), streaming: true },
+      {
+        id: asstId,
+        role: "assistant",
+        text: "",
+        createdAt: Date.now(),
+        streaming: true,
+        agentic: agenticMode,
+        agentProgress: [],
+      },
     ]);
     setSending(true);
 
@@ -358,7 +380,16 @@ export default function App() {
         setSending(false);
         cancelRef.current = null;
       },
-    }, docId, convId);
+      onProgress: (step) => {
+        setTurns((prev) =>
+          prev.map((t) =>
+            t.id === asstId
+              ? { ...t, agentProgress: [...(t.agentProgress ?? []), step] }
+              : t,
+          ),
+        );
+      },
+    }, docId, convId, { agentic: agenticMode });
   };
 
   const refreshDocuments = useCallback(async () => {
@@ -624,6 +655,7 @@ export default function App() {
               createdAt={t.createdAt}
               streamingText={t.text}
               isStreaming={t.streaming}
+              agentProgress={t.agentProgress}
             />
           ) : null,
         )}
@@ -695,6 +727,16 @@ export default function App() {
             onChange={setInput}
             onDictationError={(message) => setChatError(message)}
           />
+          <button
+            type="button"
+            className={`agentic-toggle${agenticMode ? " active" : ""}`}
+            onClick={toggleAgentic}
+            disabled={sending}
+            aria-pressed={agenticMode}
+            title="Agentic mode: the agent plans searches, checks the evidence, and refines before answering. Slower and more thorough than the classic answer."
+          >
+            Agentic
+          </button>
           <button
             type="button"
             className="send-button"

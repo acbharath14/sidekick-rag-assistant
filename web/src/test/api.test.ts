@@ -4,11 +4,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  streamChat,
   streamSummarizeDocument,
   summarizeDocument,
   uploadFile,
 } from "../api";
-import type { SummarizeEvent } from "../api";
+import type { AgentProgressEvent, SummarizeEvent } from "../api";
+import type { ChatResponse } from "../types";
 
 // --- Mock XMLHttpRequest ----------------------------------------------------
 
@@ -267,5 +269,119 @@ describe("streamSummarizeDocument", () => {
       });
     });
     vi.unstubAllGlobals();
+  });
+});
+
+// --- streamChat ---------------------------------------------------------------
+
+const DONE_RESPONSE: ChatResponse = {
+  text: "agent answer",
+  sources: ["doc.md"],
+  hits: [],
+  grounded: true,
+  latency_ms: 12,
+  standalone_question: null,
+};
+
+function runStreamChat(
+  options?: { agentic?: boolean },
+): Promise<{
+  tokens: string[];
+  progress: AgentProgressEvent[];
+  done: ChatResponse | null;
+  error: Error | null;
+  fetchMock: ReturnType<typeof mockSseFetch>;
+}> {
+  const tokens: string[] = [];
+  const progress: AgentProgressEvent[] = [];
+  let done: ChatResponse | null = null;
+  let error: Error | null = null;
+  const fetchMock = mockSseFetch([
+    `data: {"type":"progress","phase":"thought","message":"Planning search strategy..."}\n\n`,
+    `data: {"type":"progress","phase":"action","message":"Searching [search_docs]: parcels"}\n\n`,
+    `data: {"token":"agent "}\n\n`,
+    `data: {"token":"answer"}\n\n`,
+    `data: {"done":${JSON.stringify(DONE_RESPONSE)}}\n\n`,
+  ]);
+  vi.stubGlobal("fetch", fetchMock);
+  return new Promise((resolve) => {
+    streamChat(
+      "q",
+      [],
+      {
+        onToken: (t) => tokens.push(t),
+        onProgress: (e) => progress.push(e),
+        onDone: (r) => {
+          done = r;
+          vi.unstubAllGlobals();
+          resolve({ tokens, progress, done, error, fetchMock });
+        },
+        onError: (err) => {
+          error = err;
+          vi.unstubAllGlobals();
+          resolve({ tokens, progress, done, error, fetchMock });
+        },
+      },
+      null,
+      null,
+      options,
+    );
+  });
+}
+
+describe("streamChat", () => {
+  it("routes progress events to onProgress, then tokens, then done", async () => {
+    const { tokens, progress, done, error } = await runStreamChat({
+      agentic: true,
+    });
+    expect(error).toBeNull();
+    expect(progress.map((p) => p.phase)).toEqual(["thought", "action"]);
+    expect(progress[1].message).toContain("Searching [search_docs]");
+    expect(tokens).toEqual(["agent ", "answer"]);
+    expect(done).toEqual(DONE_RESPONSE);
+  });
+
+  it("sends agentic:true in the request body when enabled", async () => {
+    const { fetchMock } = await runStreamChat({ agentic: true });
+    const body = JSON.parse(
+      String(fetchMock.mock.calls[0][1].body),
+    ) as Record<string, unknown>;
+    expect(body.agentic).toBe(true);
+    expect(body.question).toBe("q");
+  });
+
+  it("defaults agentic to false in the request body", async () => {
+    const { fetchMock } = await runStreamChat();
+    const body = JSON.parse(
+      String(fetchMock.mock.calls[0][1].body),
+    ) as Record<string, unknown>;
+    expect(body.agentic).toBe(false);
+  });
+
+  it("routes error events to onError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockSseFetch([
+        `data: {"type":"error","error":"The model took too long to respond. Try again in a moment."}\n\n`,
+      ]),
+    );
+    await new Promise<void>((resolve) => {
+      streamChat(
+        "q",
+        [],
+        {
+          onToken: () => {},
+          onDone: () => {},
+          onError: (err) => {
+            expect(err.message).toContain("too long");
+            vi.unstubAllGlobals();
+            resolve();
+          },
+        },
+        null,
+        null,
+        { agentic: true },
+      );
+    });
   });
 });

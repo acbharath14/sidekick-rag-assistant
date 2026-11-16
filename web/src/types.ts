@@ -78,6 +78,12 @@ export interface SummarizeResponse {
 
 export type ChatRole = "user" | "assistant";
 
+/** One step of the ReAct agent's work, streamed as a progress event. */
+export interface AgentProgressStep {
+  phase: string;
+  message: string;
+}
+
 export interface ChatTurn {
   id: number;
   role: ChatRole;
@@ -85,6 +91,10 @@ export interface ChatTurn {
   createdAt: number;
   response?: ChatResponse;
   streaming?: boolean;
+  /** Set on assistant turns answered in agentic mode. */
+  agentic?: boolean;
+  /** Plan steps and loop phases reported while the agent worked. */
+  agentProgress?: AgentProgressStep[];
 }
 
 export interface Conversation {
