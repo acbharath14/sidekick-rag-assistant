@@ -10,6 +10,7 @@ interface Props {
   onNew: () => void;
   onRename: (id: string, title: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onOpenSettings: () => void;
 }
 
 function relativeTime(ts: number): string {
@@ -30,6 +31,7 @@ export default function ConversationSidebar({
   onNew,
   onRename,
   onDelete,
+  onOpenSettings,
 }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
@@ -73,6 +75,15 @@ export default function ConversationSidebar({
           title="Show conversations"
         >
           ☰
+        </button>
+        <button
+          type="button"
+          className="sidebar-toggle"
+          onClick={onOpenSettings}
+          aria-label="Settings"
+          title="Settings"
+        >
+          ⚙
         </button>
       </aside>
     );
@@ -171,6 +182,16 @@ export default function ConversationSidebar({
           <li className="sidebar-empty">No conversations yet.</li>
         )}
       </ul>
+      <div className="sidebar-footer">
+        <button
+          type="button"
+          className="sidebar-settings-btn"
+          onClick={onOpenSettings}
+          title="Settings"
+        >
+          ⚙ Settings
+        </button>
+      </div>
     </aside>
   );
 }
