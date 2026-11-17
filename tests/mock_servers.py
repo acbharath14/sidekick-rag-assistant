@@ -127,6 +127,64 @@ class MockGraphHandler(_BaseHandler):
         self._reply(payload)
 
 
+def _load_gmail_messages() -> list[dict]:
+    messages: list[dict] = []
+    for fixture in sorted((FIXTURES / "gmail").glob("messages-*.json")):
+        messages.extend(json.loads(fixture.read_text(encoding="utf-8")).get("messages", []))
+    # Gmail lists newest first (internalDate descending).
+    messages.sort(key=lambda m: int(m.get("internalDate", "0")), reverse=True)
+    return messages
+
+
+class MockGmailHandler(_BaseHandler):
+    """Gmail REST mock: /gmail/v1/users/me/messages (+/{id}).
+
+    The list returns message ids newest first, paginated with
+    ``maxResults``/``pageToken`` (the token is a plain offset). The
+    full-message endpoint serves the fixture payload. Requires an
+    Authorization header (401 without one).
+    """
+
+    messages = _load_gmail_messages()
+
+    def do_GET(self):
+        self._record(self.path)
+        if not self.headers.get("Authorization"):
+            self._reply({"message": "Login Required"}, status=401)
+            return
+        parsed = urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) < 4 or parts[:3] != ["gmail", "v1", "users"]:
+            self._reply({"message": "not found"}, status=404)
+            return
+        if len(parts) == 5 and parts[3] == "me" and parts[4] == "messages":
+            qs = parse_qs(parsed.query)
+            max_results = int(qs.get("maxResults", ["50"])[0])
+            offset = int(qs.get("pageToken", ["0"])[0])
+            page = self.messages[offset:offset + max_results]
+            payload: dict = {
+                "messages": [
+                    {"id": m["id"], "threadId": m.get("threadId", "")}
+                    for m in page
+                ],
+                "resultSizeEstimate": len(self.messages),
+            }
+            if offset + max_results < len(self.messages):
+                payload["nextPageToken"] = str(offset + max_results)
+            self._reply(payload)
+            return
+        if len(parts) == 6 and parts[3] == "me" and parts[4] == "messages":
+            found = next(
+                (m for m in self.messages if m["id"] == parts[5]), None
+            )
+            if found is None:
+                self._reply({"message": "not found"}, status=404)
+                return
+            self._reply(found)
+            return
+        self._reply({"message": "not found"}, status=404)
+
+
 def _load_github_fixtures() -> dict:
     """Fake GitHub data, keyed by repo (``owner/name``).
 
