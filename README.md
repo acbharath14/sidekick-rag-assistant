@@ -66,10 +66,13 @@ the retrieval pipeline, caching, and scale notes.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
+# On Windows (PowerShell): .venv\Scripts\Activate.ps1
+# On Windows (cmd): .venv\Scripts\activate.bat
 pip install -r requirements.txt
 
 # 1. Build the index (downloads the embedding model once, ~90 MB)
 PYTHONPATH=src python -m rag_demo.ingest
+# On Windows (PowerShell): $env:PYTHONPATH="src"; python -m rag_demo.ingest
 
 # 2a. Chat in the browser
 PYTHONPATH=src streamlit run app.py
@@ -101,7 +104,36 @@ PYTHONPATH=src python -m evals.per_source --source meridian
 
 # 4. Run the test suite (fakes — no models, no keys)
 RAG_DEMO_FAKE=1 PYTHONPATH=src pytest tests/ -q
+# On Windows (PowerShell): $env:RAG_DEMO_FAKE="1"; $env:PYTHONPATH="src"; pytest tests/ -q
 ```
+
+### On Windows: activation and environment variables
+
+The command blocks in this README use bash syntax. Two things work
+differently on Windows:
+
+- **Virtualenv activation.** Use `.venv\Scripts\Activate.ps1` in
+  PowerShell, or `.venv\Scripts\activate.bat` in cmd, instead of
+  `source .venv/bin/activate`.
+- **Environment variables.** The `VAR=value command` prefix used through
+  this README (for example `PYTHONPATH=src python -m rag_demo.ingest`)
+  does not work in PowerShell or cmd. Set each variable once per session,
+  then run the command without the prefix:
+
+  ```powershell
+  $env:PYTHONPATH = "src"
+  $env:RAG_DEMO_FAKE = "1"
+  pytest tests/ -q
+  ```
+
+  ```cmd
+  set PYTHONPATH=src
+  set RAG_DEMO_FAKE=1
+  pytest tests/ -q
+  ```
+
+  The same pattern applies to every other `VAR=value` in this README:
+  `RAG_DEMO_USER_GROUPS`, `RAG_DEMO_MODEL`, `LANGFUSE_*`, and the rest.
 
 ### Setup script (fresh clone)
 
@@ -292,7 +324,17 @@ retrieval pipeline.
 ./scripts/check_prereqs.sh
 ```
 
+```powershell
+# On Windows (PowerShell): same launcher, same ports
+.\scripts\dev.ps1
+```
+
 Backend at `http://127.0.0.1:8000`, frontend at `http://localhost:5173`.
+`scripts/dev.ps1` is the Windows equivalent of `dev.sh`: it stops
+anything on ports 8000 and 5173, activates `.venv\Scripts\Activate.ps1`,
+starts the backend on :8000, then the frontend on :5173. If PowerShell
+refuses to run it, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+once and try again.
 Ollama keeps models in memory when `OLLAMA_KEEP_ALIVE` is set (the
 prereq script warns if it isn't). Without it, every prompt pays a full
 model reload on CPU.
@@ -414,6 +456,14 @@ Tracing is off by default. Nothing changes unless you set the keys.
    export LANGFUSE_SECRET_KEY=sk-lf-...
    ./scripts/dev.sh
    ```
+   On Windows (PowerShell), set the same keys with `$env:` and start
+   the Windows launcher instead:
+   ```
+   $env:LANGFUSE_BASE_URL = "http://localhost:3000"
+   $env:LANGFUSE_PUBLIC_KEY = "pk-lf-..."
+   $env:LANGFUSE_SECRET_KEY = "sk-lf-..."
+   .\scripts\dev.ps1
+   ```
    The keys are secrets. Keep them in your shell only and never commit
    them.
 3. Ask a question in the chat. In Langfuse, open Traces and click the
@@ -459,6 +509,9 @@ Add to your MCP client config (e.g. Claude Code):
   }
 }
 ```
+
+On Windows, use `.venv\Scripts\python.exe` as the command instead of
+`/path/to/.venv/bin/python` (same repo-relative path, Windows form).
 
 Then ask your client to "search the Meridian docs for the rollback procedure".
 It will call `search_docs` and answer from the corpus.
@@ -592,10 +645,18 @@ PYTHONPATH=src python -m rag_demo.agentic_cli "Walmart Black Friday deals 2026"
 0 2 * * * cd /path/to/sidekick-rag-assistant && PYTHONPATH=src .venv/bin/python -m rag_demo.ingest --source confluence-mock --incremental
 ```
 
+On Windows, use Task Scheduler with a daily 2:00 AM trigger. Create a
+task whose action starts `.venv\Scripts\python.exe` with arguments
+`-m rag_demo.ingest --source confluence-mock --incremental`, set "Start
+in" to the repo folder, and set `PYTHONPATH=src` in the task (or run it
+from a small PowerShell script that sets `$env:PYTHONPATH = "src"` first).
+
 **Credentials**: connectors read secrets from env vars only
 (`RAG_DEMO_GITHUB_TOKEN`). Never commit tokens: `.gitignore` covers `.env`.
 
-**Audit log**: set `RAG_DEMO_AUDIT_LOG=/var/log/rag-demo/audit.jsonl` to record
+**Audit log**: set `RAG_DEMO_AUDIT_LOG=/var/log/rag-demo/audit.jsonl`
+(on Windows: `%LOCALAPPDATA%\rag-demo\audit.jsonl`, or a relative path
+such as `logs\audit.jsonl`) to record
 one JSON line per question (timestamp, question, sources, groups, model,
 latency). Answer text is excluded unless `RAG_DEMO_AUDIT_LOG_ANSWERS=1`.
 
