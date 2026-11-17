@@ -18,13 +18,35 @@ else
 fi
 
 echo "Checking OLLAMA_KEEP_ALIVE ..."
-KEEP_ALIVE="$(launchctl getenv OLLAMA_KEEP_ALIVE 2>/dev/null || true)"
+# launchctl exists on macOS only. Under Git Bash on Windows there is no
+# launchctl, so print the Windows fix (setx) instead of the macOS one.
+# On any other system without launchctl, fall back to the plain env var.
+IS_WINDOWS=0
+case "${OSTYPE:-}" in
+    msys*|cygwin*) IS_WINDOWS=1 ;;
+esac
+if [ -n "${WINDIR:-}" ]; then
+    IS_WINDOWS=1
+fi
+if [ "$IS_WINDOWS" -eq 1 ]; then
+    KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-}"
+    KEEP_ALIVE_FIX="setx OLLAMA_KEEP_ALIVE 24h"
+    KEEP_ALIVE_AFTER="Then quit and restart the Ollama app (or the Ollama service)."
+elif command -v launchctl >/dev/null 2>&1; then
+    KEEP_ALIVE="$(launchctl getenv OLLAMA_KEEP_ALIVE 2>/dev/null || true)"
+    KEEP_ALIVE_FIX="launchctl setenv OLLAMA_KEEP_ALIVE 24h"
+    KEEP_ALIVE_AFTER="Then quit and restart the Ollama app."
+else
+    KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-}"
+    KEEP_ALIVE_FIX="export OLLAMA_KEEP_ALIVE=24h  (or set it in your shell profile)"
+    KEEP_ALIVE_AFTER="Then quit and restart Ollama."
+fi
 if [ -z "$KEEP_ALIVE" ]; then
     echo "WARN: OLLAMA_KEEP_ALIVE is not set."
     echo "  Without it, Ollama unloads the model after 5 min idle,"
     echo "  and every new prompt pays a full model reload on CPU."
-    echo "  Fix: launchctl setenv OLLAMA_KEEP_ALIVE 24h"
-    echo "  Then quit and restart the Ollama app."
+    echo "  Fix: $KEEP_ALIVE_FIX"
+    echo "  $KEEP_ALIVE_AFTER"
 else
     echo "OK: OLLAMA_KEEP_ALIVE=$KEEP_ALIVE"
 fi
