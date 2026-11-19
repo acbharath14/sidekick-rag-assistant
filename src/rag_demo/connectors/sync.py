@@ -28,12 +28,14 @@ from ..sources import DocumentSource
 from .base import Connector, to_documents
 from .confluence import ConfluenceConnector
 from .github import GitHubConnector
+from .gmail import GmailConnector
 from .outlook import OutlookConnector
 
 CONNECTORS: dict[str, type[Connector]] = {
     "confluence": ConfluenceConnector,
     "outlook": OutlookConnector,
     "github": GitHubConnector,
+    "gmail": GmailConnector,
 }
 
 # Display metadata for the GUI (and anything else listing sources).
@@ -62,6 +64,14 @@ SOURCE_INFO: dict[str, dict] = {
         "token_env": "GITHUB_TOKEN",
         "token_config_key": "token",
         "hint": "Create a fine-grained PAT (Contents, Issues, Pull requests: read-only) and set GITHUB_REPO, or paste a token below.",
+    },
+    "gmail": {
+        "label": "Gmail",
+        "auth": "OAuth2 access token",
+        "required_env": ["GMAIL_ACCESS_TOKEN"],
+        "token_env": "GMAIL_ACCESS_TOKEN",
+        "token_config_key": "access_token",
+        "hint": "Paste a Gmail OAuth2 access token below (see docs/connectors.md for how to get one).",
     },
 }
 

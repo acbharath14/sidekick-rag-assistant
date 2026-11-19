@@ -43,6 +43,7 @@ def _clear_connector_env(monkeypatch):
         "GITHUB_REPO",
         "GITHUB_REPOS",
         "RAG_DEMO_GITHUB_REPO",
+        "GMAIL_ACCESS_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -64,7 +65,7 @@ def test_list_connectors_unconfigured(monkeypatch, tmp_settings):
     r = client.get("/api/connectors")
     assert r.status_code == 200
     sources = {c["source"]: c for c in r.json()["connectors"]}
-    assert sorted(sources) == ["confluence", "github", "outlook"]
+    assert sorted(sources) == ["confluence", "github", "gmail", "outlook"]
     for conn in sources.values():
         assert conn["configured"] is False
         assert conn["missing_env"]

@@ -508,3 +508,195 @@ def test_sync_github_cli_entry_point(monkeypatch, tmp_path, fake_embeddings, cap
     assert "9 total" in out
     assert FAKE_GITHUB_TOKEN not in out
     assert (index_dir / "index.faiss").exists()
+
+# ---------------------------------------------------------------------------
+# Gmail client against the mock
+# ---------------------------------------------------------------------------
+
+from mock_servers import MockGmailHandler  # noqa: E402
+from rag_demo.connectors.gmail import GmailConnector  # noqa: E402
+
+FAKE_GMAIL_TOKEN = "FAKE-GMAIL-TOKEN-3f7a19d4"
+GMAIL_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gmail"
+
+
+@pytest.fixture()
+def gmail_mock():
+    with mock_server(MockGmailHandler) as (base_url, log):
+        yield base_url, log
+
+
+def _gmail_connector(base_url, **kw):
+    connector = GmailConnector()
+    connector.connect({"access_token": FAKE_GMAIL_TOKEN, "base_url": base_url, **kw})
+    return connector
+
+
+def _gmail_env(monkeypatch, base_url):
+    monkeypatch.setenv("GMAIL_ACCESS_TOKEN", FAKE_GMAIL_TOKEN)
+    monkeypatch.setenv("GMAIL_BASE_URL", base_url)
+
+
+def test_gmail_fetch_all(gmail_mock):
+    base_url, log = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since(None))
+    assert [d.title for d in docs] == [
+        "API key rotation — action required",
+        "Driver pay bands FY27 — effective dates",
+        "EDI outage resolved",
+        "TMS deploy window Friday",
+    ]
+    assert docs[0].source_label == "gmail:API key rotation — action required"
+    assert docs[0].doc_id == "gmail:msg-g4"
+    assert docs[0].updated_at == "2026-10-06T08:45:00Z"
+    assert docs[0].url == "https://mail.google.com/mail/u/0/#inbox/msg-g4"
+    assert "Reminder: API keys rotate" in docs[0].text
+    assert "<html>" not in docs[0].text  # HTML bodies are stripped
+    assert log and all(entry["auth"] == "Bearer" for entry in log)
+    assert not any(FAKE_GMAIL_TOKEN in str(entry) for entry in log)
+
+
+def test_gmail_source_labels(gmail_mock):
+    base_url, _ = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since(None))
+    by_label = {d.source_label: d for d in docs}
+    assert by_label["gmail:TMS deploy window Friday"].doc_id == "gmail:msg-g1"
+    assert by_label["gmail:EDI outage resolved"].updated_at == "2026-10-02T09:12:00Z"
+    assert all(d.source_label.startswith("gmail:") for d in docs)
+
+
+def test_gmail_paginates(monkeypatch, gmail_mock):
+    monkeypatch.setattr("rag_demo.connectors.gmail._PAGE_SIZE", 2)
+    base_url, log = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since(None))
+    assert len(docs) == 4
+    list_paths = [
+        e["path"] for e in log
+        if e["path"].split("?")[0].endswith("/messages")
+    ]
+    assert len(list_paths) == 2  # two list pages of 2 ids each
+
+
+def test_gmail_fetch_since_is_incremental(gmail_mock):
+    base_url, log = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since("2026-10-03T00:00:00Z"))
+    assert [d.title for d in docs] == [
+        "API key rotation — action required",
+        "Driver pay bands FY27 — effective dates",
+    ]
+    # The client stops at the first message at/before the cutoff, so the
+    # oldest message is never even fetched.
+    assert not any("/msg-g1" in e["path"] for e in log)
+
+
+def test_gmail_multipart_prefers_plain_text(gmail_mock):
+    base_url, _ = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since(None))
+    by_id = {d.doc_id: d for d in docs}
+    text = by_id["gmail:msg-g3"].text
+    assert "Driver pay bands FY27 take effect October 1" in text
+    assert "managers should confirm each driver's band" in text
+    assert "<html>" not in text
+    assert "<p>" not in text
+
+
+def test_gmail_html_body_stripped(gmail_mock):
+    base_url, _ = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since(None))
+    by_id = {d.doc_id: d for d in docs}
+    text = by_id["gmail:msg-g2"].text
+    assert "dead-letter queue for 30 days" in text
+    assert "<html>" not in text
+    assert "<p>" not in text
+
+
+def test_gmail_snippet_fallback(gmail_mock):
+    base_url, _ = gmail_mock
+    docs = list(_gmail_connector(base_url).fetch_since(None))
+    by_id = {d.doc_id: d for d in docs}
+    # msg-g4 carries no body parts; the snippet is the document text.
+    assert "Reminder: API keys rotate" in by_id["gmail:msg-g4"].text
+
+
+def test_gmail_missing_token_raises(monkeypatch):
+    monkeypatch.delenv("GMAIL_ACCESS_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="GMAIL_ACCESS_TOKEN"):
+        GmailConnector().connect({})
+
+
+def test_gmail_mock_requires_auth(gmail_mock):
+    import requests
+
+    base_url, _ = gmail_mock
+    resp = requests.get(f"{base_url}/gmail/v1/users/me/messages", timeout=10)
+    assert resp.status_code == 401
+
+
+def test_gmail_token_never_appears_in_logs_or_output(monkeypatch, caplog, capsys, gmail_mock):
+    base_url, log = gmail_mock
+    with caplog.at_level(logging.DEBUG, logger="rag_demo.connectors.gmail"):
+        list(_gmail_connector(base_url).fetch_since(None))
+    assert FAKE_GMAIL_TOKEN not in caplog.text
+    assert FAKE_GMAIL_TOKEN not in capsys.readouterr().out
+    assert FAKE_GMAIL_TOKEN not in json.dumps(log)
+    assert {entry["auth"] for entry in log} == {"Bearer"}
+
+
+# ---------------------------------------------------------------------------
+# Gmail sync end to end: mock source -> indexed -> cited answer
+# ---------------------------------------------------------------------------
+
+
+def test_sync_gmail_end_to_end(monkeypatch, tmp_path, fake_embeddings, gmail_mock):
+    base_url, _ = gmail_mock
+    _gmail_env(monkeypatch, base_url)
+    index_dir = tmp_path / "index"
+    settings = Settings(index_dir=index_dir)
+    summary = sync_source(GmailConnector(), settings)
+    assert summary == {
+        "source": "gmail",
+        "fetched": 4,
+        "total": 4,
+        "last_sync": "2026-10-06T08:45:00Z",
+    }
+    state = json.loads((index_dir / "sync-state.json").read_text(encoding="utf-8"))
+    assert state["last_sync"] == "2026-10-06T08:45:00Z"
+    assert state["connector_state"]["newest_internal_date_ms"] == 1791276300000
+    assert FAKE_GMAIL_TOKEN not in (index_dir / "sync-state.json").read_text(encoding="utf-8")
+    chunks = json.loads((index_dir / "chunks.json").read_text(encoding="utf-8"))
+    assert "gmail:API key rotation — action required" in {c["source"] for c in chunks}
+    assert FAKE_GMAIL_TOKEN not in (index_dir / "chunks.json").read_text(encoding="utf-8")
+
+    retriever = Retriever(Settings(index_dir=index_dir), embeddings=fake_embeddings)
+    hits = retriever.search("API key rotation schedule", rerank=False)
+    assert hits
+    assert all(h.source.startswith("gmail:") for h in hits)
+
+
+def test_sync_gmail_is_incremental_on_second_run(monkeypatch, tmp_path, fake_embeddings, gmail_mock):
+    base_url, _ = gmail_mock
+    _gmail_env(monkeypatch, base_url)
+    index_dir = tmp_path / "index"
+    settings = Settings(index_dir=index_dir)
+    first = sync_source(GmailConnector(), settings)
+    second = sync_source(GmailConnector(), settings)
+    assert first["fetched"] == 4
+    assert second == {
+        "source": "gmail",
+        "fetched": 0,
+        "total": 4,
+        "last_sync": "2026-10-06T08:45:00Z",
+    }
+
+
+def test_sync_gmail_cli_entry_point(monkeypatch, tmp_path, fake_embeddings, capsys, gmail_mock):
+    base_url, _ = gmail_mock
+    _gmail_env(monkeypatch, base_url)
+    index_dir = tmp_path / "index"
+    rc = sync_main(["--source", "gmail", "--index-dir", str(index_dir), "--full"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fetched 4 new/changed" in out
+    assert "4 total" in out
+    assert FAKE_GMAIL_TOKEN not in out
+    assert (index_dir / "index.faiss").exists()
