@@ -1,0 +1,78 @@
+{
+ "messages": [
+  {
+   "id": "msg-g1",
+   "threadId": "thread-g1",
+   "labelIds": [
+    "INBOX"
+   ],
+   "snippet": "Team, the TMS deploy window is Friday 02:00-04:00 UTC.",
+   "historyId": "1001",
+   "internalDate": "1790609400000",
+   "payload": {
+    "partId": "",
+    "mimeType": "text/plain",
+    "filename": "",
+    "headers": [
+     {
+      "name": "Subject",
+      "value": "TMS deploy window Friday"
+     },
+     {
+      "name": "From",
+      "value": "Priya Nair <priya@meridian.example>"
+     },
+     {
+      "name": "Date",
+      "value": "Sun, 28 Sep 2026 15:30:00 +0000"
+     },
+     {
+      "name": "Message-ID",
+      "value": "<TMS depl@meridian.example>"
+     }
+    ],
+    "body": {
+     "size": 148,
+     "data": "VGVhbSwgdGhlIFRNUyBkZXBsb3kgd2luZG93IGlzIEZyaWRheSAwMjowMC0wNDowMCBVVEMuIEZyZWV6ZSBzdGFydHMgVGh1cnNkYXkgMTg6MDAuIFBsZWFzZSBob2xkIG5vbi1jcml0aWNhbCBjaGFuZ2VzIHVudGlsIHRoZSB3aW5kb3cgY2xvc2VzLgoK4oCUIFByaXlh"
+    }
+   }
+  },
+  {
+   "id": "msg-g2",
+   "threadId": "thread-g2",
+   "labelIds": [
+    "INBOX"
+   ],
+   "snippet": "The EDI outage is resolved. Failed transmissions retried 5 times.",
+   "historyId": "1001",
+   "internalDate": "1790932320000",
+   "payload": {
+    "partId": "",
+    "mimeType": "text/html",
+    "filename": "",
+    "headers": [
+     {
+      "name": "Subject",
+      "value": "EDI outage resolved"
+     },
+     {
+      "name": "From",
+      "value": "Meridian Ops <ops@meridian.example>"
+     },
+     {
+      "name": "Date",
+      "value": "Fri, 2 Oct 2026 09:12:00 +0000"
+     },
+     {
+      "name": "Message-ID",
+      "value": "<EDI outa@meridian.example>"
+     }
+    ],
+    "body": {
+     "size": 214,
+     "data": "PGh0bWw-PGJvZHk-PHA-VGhlIEVESSBvdXRhZ2UgaXMgcmVzb2x2ZWQuIEZhaWxlZCB0cmFuc21pc3Npb25zIHJldHJpZWQgNSB0aW1lcyB3aXRoIGV4cG9uZW50aWFsIGJhY2tvZmYsIGFuZCB0aGUgcmVtYWluZGVyIGxhbmRlZCBpbiB0aGUgZGVhZC1sZXR0ZXIgcXVldWUgZm9yIDMwIGRheXMsIHBlciB0aGUgcmV0cnkgcG9saWN5LiBObyBhY3Rpb24gbmVlZGVkLjwvcD48L2JvZHk-PC9odG1sPg"
+    }
+   }
+  }
+ ]
+}

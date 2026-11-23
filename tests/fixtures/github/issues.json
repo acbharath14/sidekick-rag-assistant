@@ -1,0 +1,32 @@
+[
+ {
+  "id": 1,
+  "number": 1,
+  "title": "Bulk import fails on empty CSV",
+  "body": "Uploading an empty CSV to bulk import returns a 500 instead of a friendly error.",
+  "state": "open",
+  "updated_at": "2026-10-01T10:00:00Z",
+  "html_url": "https://github.com/acme/widgets/issues/1"
+ },
+ {
+  "id": 2,
+  "number": 2,
+  "title": "Stock webhook retries too aggressively",
+  "body": "The stock webhook retries every second on failure. Back off to once a minute.",
+  "state": "closed",
+  "updated_at": "2026-10-03T12:00:00Z",
+  "html_url": "https://github.com/acme/widgets/issues/2"
+ },
+ {
+  "id": 3,
+  "number": 3,
+  "title": "Add bulk import",
+  "body": "Bulk import from CSV for new SKUs.",
+  "state": "closed",
+  "updated_at": "2026-10-02T09:00:00Z",
+  "html_url": "https://github.com/acme/widgets/issues/3",
+  "pull_request": {
+   "url": "https://api.github.com/repos/acme/widgets/pulls/3"
+  }
+ }
+]
