@@ -1,0 +1,98 @@
+{
+ "messages": [
+  {
+   "id": "msg-g3",
+   "threadId": "thread-g3",
+   "labelIds": [
+    "INBOX"
+   ],
+   "snippet": "Driver pay bands FY27 take effect October 1.",
+   "historyId": "1001",
+   "internalDate": "1791025200000",
+   "payload": {
+    "partId": "",
+    "mimeType": "multipart/alternative",
+    "filename": "",
+    "headers": [
+     {
+      "name": "Subject",
+      "value": "Driver pay bands FY27 \u2014 effective dates"
+     },
+     {
+      "name": "From",
+      "value": "Meridian HR <hr@meridian.example>"
+     },
+     {
+      "name": "Date",
+      "value": "Sat, 3 Oct 2026 11:00:00 +0000"
+     },
+     {
+      "name": "Message-ID",
+      "value": "<Driver p@meridian.example>"
+     }
+    ],
+    "body": {
+     "size": 0
+    },
+    "parts": [
+     {
+      "partId": "0",
+      "mimeType": "text/plain",
+      "filename": "",
+      "headers": [],
+      "body": {
+       "size": 171,
+       "data": "RHJpdmVyIHBheSBiYW5kcyBGWTI3IHRha2UgZWZmZWN0IE9jdG9iZXIgMS4gVGhlIG5ldyBiYW5kcyBhcmUgcHVibGlzaGVkIG9uIHRoZSBpbnRyYW5ldDsgbWFuYWdlcnMgc2hvdWxkIGNvbmZpcm0gZWFjaCBkcml2ZXIncyBiYW5kIGJlZm9yZSB0aGUgZmlyc3QgT2N0b2JlciBwYXlyb2xsIHJ1bi4"
+      }
+     },
+     {
+      "partId": "1",
+      "mimeType": "text/html",
+      "filename": "",
+      "headers": [],
+      "body": {
+       "size": 190,
+       "data": "PGh0bWw-PGJvZHk-PHA-RHJpdmVyIHBheSBiYW5kcyBGWTI3IHRha2UgZWZmZWN0IE9jdG9iZXIgMS4gVGhlIG5ldyBiYW5kcyBhcmUgcHVibGlzaGVkIG9uIHRoZSBpbnRyYW5ldC48L3A-PC9ib2R5PjwvaHRtbD4"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "msg-g4",
+   "threadId": "thread-g4",
+   "labelIds": [
+    "INBOX"
+   ],
+   "snippet": "Reminder: API keys rotate on the schedule published in Confluence.",
+   "historyId": "1001",
+   "internalDate": "1791276300000",
+   "payload": {
+    "partId": "",
+    "mimeType": "text/plain",
+    "filename": "",
+    "headers": [
+     {
+      "name": "Subject",
+      "value": "API key rotation \u2014 action required"
+     },
+     {
+      "name": "From",
+      "value": "Meridian Security <sec@meridian.example>"
+     },
+     {
+      "name": "Date",
+      "value": "Tue, 6 Oct 2026 08:45:00 +0000"
+     },
+     {
+      "name": "Message-ID",
+      "value": "<API key @meridian.example>"
+     }
+    ],
+    "body": {
+     "size": 0
+    }
+   }
+  }
+ ]
+}

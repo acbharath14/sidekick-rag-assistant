@@ -1,0 +1,29 @@
+[
+ {
+  "id": 104,
+  "number": 4,
+  "title": "Add CSV bulk import",
+  "body": "Implements bulk import from CSV, including validation errors per row.",
+  "state": "open",
+  "updated_at": "2026-10-02T09:00:00Z",
+  "html_url": "https://github.com/acme/widgets/pull/4"
+ },
+ {
+  "id": 105,
+  "number": 5,
+  "title": "Fix webhook retry backoff",
+  "body": "Retries the stock webhook once a minute instead of every second.",
+  "state": "closed",
+  "updated_at": "2026-10-04T15:00:00Z",
+  "html_url": "https://github.com/acme/widgets/pull/5"
+ },
+ {
+  "id": 106,
+  "number": 6,
+  "title": "Document the stock webhook",
+  "body": "Adds webhook docs to the API reference.",
+  "state": "open",
+  "updated_at": "2026-10-05T08:00:00Z",
+  "html_url": "https://github.com/acme/widgets/pull/6"
+ }
+]

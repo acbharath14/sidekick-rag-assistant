@@ -32,7 +32,7 @@ class ConnectorDoc:
     title: str
     text: str
     source_label: str
-    updated_at: str
+    updated_at: str | None = None  # ISO 8601, when the source provides one
     url: str | None = None
     doc_id: str | None = None
 
@@ -41,6 +41,16 @@ class Connector(ABC):
     """One external system. Subclasses implement three methods."""
 
     source_name: str = "unnamed"
+
+    def __init__(self) -> None:
+        # Working state, updated by fetch_since as it runs (e.g. per-repo
+        # blob SHAs for incremental sync). The sync layer loads it from
+        # the state file before fetching and persists it afterwards.
+        self.state: dict = {}
+        # Doc ids the source currently holds (GitHub README + docs). The
+        # sync layer prunes stored docs for this source that are no longer
+        # present. Only set for kinds the source can enumerate.
+        self.present_doc_ids: set[str] = set()
 
     @abstractmethod
     def connect(self, config: dict | None = None) -> None:

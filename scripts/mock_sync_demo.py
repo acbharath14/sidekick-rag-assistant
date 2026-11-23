@@ -1,10 +1,10 @@
-"""Demo: run the real sync CLI against both mock servers (no live tokens).
+"""Demo: run the real sync CLI against the mock servers (no live tokens).
 
     RAG_DEMO_EMBEDDINGS=fake python scripts/mock_sync_demo.py
 
-Starts a mock Confluence server and a mock Graph server on localhost,
-runs the sync CLI against each with fake tokens, and prints the summaries.
-The CLI uses fake embeddings so nothing is downloaded.
+Starts mock Confluence, Graph, and GitHub servers on localhost, runs the
+sync CLI against each with fake tokens, and prints the summaries. The CLI
+uses fake embeddings so nothing is downloaded.
 """
 
 import os
@@ -16,7 +16,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 
-from mock_servers import MockConfluenceHandler, MockGraphHandler, mock_server
+from mock_servers import (  # noqa: E402
+    MockConfluenceHandler,
+    MockGitHubHandler,
+    MockGraphHandler,
+    mock_server,
+)
 
 
 def run_cli(env_extra, args):
@@ -49,6 +54,24 @@ def main() -> int:
             run_cli(
                 {"OUTLOOK_BEARER_TOKEN": "FAKE-DEMO-TOKEN", "OUTLOOK_BASE_URL": graph_url},
                 ["--source", "outlook", "--index-dir", f"{tmp}/out", "--full"],
+            )
+        MockGitHubHandler.reset()
+        with mock_server(MockGitHubHandler) as (github_url, _):
+            run_cli(
+                {
+                    "GITHUB_TOKEN": "FAKE-DEMO-TOKEN",
+                    "GITHUB_REPO": "acme/widgets",
+                    "GITHUB_BASE_URL": github_url,
+                },
+                ["--source", "github", "--index-dir", f"{tmp}/gh", "--full"],
+            )
+            run_cli(
+                {
+                    "GITHUB_TOKEN": "FAKE-DEMO-TOKEN",
+                    "GITHUB_REPO": "acme/widgets",
+                    "GITHUB_BASE_URL": github_url,
+                },
+                ["--source", "github", "--index-dir", f"{tmp}/gh"],
             )
     print("mock sync demo OK")
     return 0
