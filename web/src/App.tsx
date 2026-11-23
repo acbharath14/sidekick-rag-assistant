@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   clearConversationMessages,
   createConversation,
@@ -34,7 +34,15 @@ import DocumentDetail from "./components/DocumentDetail";
 import DocumentsView from "./components/DocumentsView";
 import HealthIndicator from "./components/HealthIndicator";
 import MicButton from "./components/MicButton";
+import SettingsPanel from "./components/SettingsPanel";
 import UploadCard from "./components/UploadCard";
+import {
+  applySettings,
+  loadSettings,
+  resetSettings,
+  saveSettings,
+} from "./settings";
+import type { GuiSettings } from "./settings";
 
 let nextId = 1;
 
@@ -100,6 +108,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem(SIDEBAR_KEY) === "1",
   );
+  const [settings, setSettings] = useState<GuiSettings>(() => loadSettings());
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -126,6 +136,12 @@ export default function App() {
       setHealthLoading(false);
     }
   }, []);
+
+  // GUI settings: apply theme/density/font size and persist on every change.
+  useLayoutEffect(() => {
+    applySettings(settings);
+    saveSettings(settings);
+  }, [settings]);
 
   useEffect(() => {
     void loadConfig();
@@ -492,6 +508,7 @@ export default function App() {
         onNew={() => void handleNewChat()}
         onRename={handleRenameConversation}
         onDelete={handleDeleteConversation}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <div className="app-main">
       <header className="app-header">
@@ -609,7 +626,7 @@ export default function App() {
         {turns.map((t) =>
           t.role === "user" ? (
             <article key={t.id} className="message message-user">
-              <Avatar role="user" />
+              <Avatar role="user" settings={settings} />
               <div className="message-content">
                 <div className="message-body">{t.text}</div>
                 <div className="message-time message-time-user">
@@ -628,6 +645,7 @@ export default function App() {
               createdAt={t.createdAt}
               streamingText={t.text}
               isStreaming={t.streaming}
+              settings={settings}
             />
           ) : null,
         )}
@@ -712,6 +730,14 @@ export default function App() {
       </>
       )}
       </div>
+      {settingsOpen && (
+        <SettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          onReset={() => setSettings(resetSettings())}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 }
