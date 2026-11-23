@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import type { ChatResponse } from "../types";
+import type { AgentProgressStep, ChatResponse } from "../types";
 import { DEFAULT_SETTINGS } from "../settings";
 import type { GuiSettings } from "../settings";
 import Avatar from "./Avatar";
@@ -14,6 +14,8 @@ interface Props {
   streamingText?: string;
   isStreaming?: boolean;
   settings?: GuiSettings;
+  /** Plan steps and loop phases reported while the agent worked. */
+  agentProgress?: AgentProgressStep[];
 }
 
 export function formatTime(ts: number): string {
@@ -98,6 +100,7 @@ export default function ChatMessage({
   streamingText,
   isStreaming = false,
   settings = DEFAULT_SETTINGS,
+  agentProgress,
 }: Props) {
   const text = isStreaming && streamingText !== undefined ? streamingText : response.text;
   const latency = formatLatency(response.latency_ms);
@@ -106,6 +109,22 @@ export default function ChatMessage({
     <article className="message message-assistant">
       <Avatar role="assistant" settings={settings} />
       <div className="message-content">
+      {agentProgress && agentProgress.length > 0 && (
+        <details className="agent-plan" open={isStreaming}>
+          <summary>
+            Agent plan · {agentProgress.length} step
+            {agentProgress.length === 1 ? "" : "s"}
+            {isStreaming ? " (running…)" : ""}
+          </summary>
+          <ol className="agent-steps">
+            {agentProgress.map((step, i) => (
+              <li key={i}>
+                <span className="agent-phase">{step.phase}</span> {step.message}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       {!response.grounded && (
         <span
           className="fallback-badge"

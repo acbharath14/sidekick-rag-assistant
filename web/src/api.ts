@@ -314,10 +314,23 @@ export async function clearConversationMessages(id: string): Promise<void> {
   if (!data.ok) throw new Error(data.error ?? "Clear failed");
 }
 
+export interface AgentProgressEvent {
+  phase: string;
+  message: string;
+}
+
 export interface StreamCallbacks {
   onToken: (token: string) => void;
   onDone: (response: ChatResponse) => void;
   onError: (err: Error) => void;
+  /** Agentic mode only: plan steps and loop phases as the agent works. */
+  onProgress?: (event: AgentProgressEvent) => void;
+}
+
+export interface StreamChatOptions {
+  /** When true, the backend answers via the ReAct agent instead of the
+   * classic chain, and streams progress events alongside the tokens. */
+  agentic?: boolean;
 }
 
 export function streamChat(
@@ -326,6 +339,7 @@ export function streamChat(
   cb: StreamCallbacks,
   documentId?: string | null,
   conversationId?: string | null,
+  options?: StreamChatOptions,
 ): () => void {
   const ctrl = new AbortController();
   let buffer = "";
@@ -340,6 +354,7 @@ export function streamChat(
           history,
           document_id: documentId ?? null,
           conversation_id: conversationId ?? null,
+          agentic: options?.agentic ?? false,
         }),
         signal: ctrl.signal,
       });
@@ -361,9 +376,15 @@ export function streamChat(
           if (!line.startsWith("data:")) continue;
           const payload = JSON.parse(line.slice(5).trim()) as
             | { token: string }
-            | { done: ChatResponse };
+            | { done: ChatResponse }
+            | { type: "progress"; phase: string; message: string }
+            | { type: "error"; error: string };
           if ("token" in payload) {
             cb.onToken(payload.token);
+          } else if ("type" in payload && payload.type === "progress") {
+            cb.onProgress?.({ phase: payload.phase, message: payload.message });
+          } else if ("type" in payload && payload.type === "error") {
+            throw new Error(payload.error);
           } else {
             cb.onDone(payload.done);
           }
